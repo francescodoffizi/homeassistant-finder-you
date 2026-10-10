@@ -8,6 +8,7 @@ name.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .proto import parse_fields
 
@@ -262,6 +263,44 @@ def extract_shutter_positions(payload: bytes) -> dict[str, int]:
         pos = pos_fields.get(1, [None])[0]
         if isinstance(pos, int) and 0 <= pos <= 100:
             out[uuid_b.decode()] = pos
+    return out
+
+
+def extract_channel_states(payload: bytes) -> dict[tuple[str, int], dict[str, Any]]:
+    """Return ``{(device_uuid, channel): {'is_on': bool, 'brightness': int|None}}``."""
+    out: dict[tuple[str, int], dict[str, Any]] = {}
+    for _sub, fields in _iter_state_submessages(payload):
+        uuid_b = fields.get(1, [None])[0]
+        if not isinstance(uuid_b, bytes) or len(uuid_b) != 36:
+            continue
+        dev_uuid = uuid_b.decode()
+        fam_b = fields.get(3, [b""])[0]
+        fam = fam_b.decode(errors="replace") if isinstance(fam_b, bytes) else ""
+        f5 = fields.get(5, [b""])[0]
+        f13 = fields.get(13, [None])[0]
+        f13_p = {}
+        if isinstance(f13, bytes):
+            try:
+                f13_p = parse_fields(f13)
+            except Exception:
+                pass
+
+        if fam == "1521":  # Dimmer
+            brightness_pct = None
+            if 1 in f13_p and isinstance(f13_p[1][0], int):
+                brightness_pct = f13_p[1][0]
+            is_on = bool(brightness_pct is not None and brightness_pct > 0)
+            brightness_val = (
+                round((brightness_pct / 100) * 255) if brightness_pct is not None else None
+            )
+            out[(dev_uuid, 1)] = {"is_on": is_on, "brightness": brightness_val}
+        elif fam in ("1322", "1372"):  # 2-channel Relays / Switches
+            if isinstance(f5, bytes) and len(f5) >= 7:
+                b6 = f5[6]
+                ch1_on = bool(b6 & 0x01)
+                ch2_on = bool(b6 & 0x10) if fam == "1372" else bool(b6 & 0x02)
+                out[(dev_uuid, 1)] = {"is_on": ch1_on, "brightness": None}
+                out[(dev_uuid, 2)] = {"is_on": ch2_on, "brightness": None}
     return out
 
 

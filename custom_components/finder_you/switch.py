@@ -59,6 +59,9 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
 
     @property
     def is_on(self) -> bool:
+        channel_data = self.coordinator.channel_states.get((self._switch.uuid, self._switch.channel))
+        if channel_data is not None and "is_on" in channel_data:
+            return channel_data["is_on"]
         return self._is_on
 
     async def async_turn_on(self, **kwargs: Any) -> None:

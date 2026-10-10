@@ -72,13 +72,19 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
 
     @property
     def is_on(self) -> bool:
+        channel_data = self.coordinator.channel_states.get((self._light.uuid, self._light.channel))
+        if channel_data is not None and "is_on" in channel_data:
+            return channel_data["is_on"]
         return self._is_on
 
     @property
     def brightness(self) -> int | None:
-        if self._light.is_dimmer:
-            return self._brightness
-        return None
+        if not self._light.is_dimmer:
+            return None
+        channel_data = self.coordinator.channel_states.get((self._light.uuid, self._light.channel))
+        if channel_data is not None and channel_data.get("brightness") is not None:
+            return channel_data["brightness"]
+        return self._brightness
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the light, optionally adjusting brightness."""

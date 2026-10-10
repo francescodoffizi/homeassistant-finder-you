@@ -22,6 +22,7 @@ from .api import (
     Scenario,
     Shutter,
     Switch,
+    extract_channel_states,
     extract_shutter_motion,
     extract_shutter_positions,
     extract_shutter_states,
@@ -113,6 +114,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._scenarios: list[Scenario] = []
         self._lights: list[Light] = []
         self._switches: list[Switch] = []
+        self._channel_states: dict[tuple[str, int], dict[str, Any]] = {}
         # Wedge characterization: track when the gateway last produced
         # fresh telemetry for *any* shutter, so we can tell whether the
         # cloud-to-puck link is alive without needing a user command.
@@ -156,6 +158,10 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
     @property
     def switches(self) -> list[Switch]:
         return self._switches
+
+    @property
+    def channel_states(self) -> dict[tuple[str, int], dict[str, Any]]:
+        return self._channel_states
 
 
     @property
@@ -269,6 +275,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             self._lights = lights
         if switches:
             self._switches = switches
+        self._channel_states = extract_channel_states(plant_payload)
         positions = extract_shutter_positions(plant_payload)
         self._track_telemetry_freshness(plant_payload)
         return {s.uuid: positions.get(s.uuid) for s in self._shutters}
