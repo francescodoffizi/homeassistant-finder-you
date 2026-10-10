@@ -600,17 +600,27 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
     async def async_switch_on(self, device_uuid: str, channel: int = 1) -> None:
         """Switch on a light or plug channel."""
         assert self._plant_id is not None
+        curr = self._channel_states.get((device_uuid, channel), {}).get("is_on")
+        if curr is True:
+            _LOGGER.debug("device %s channel %d already on, skipping toggle", device_uuid, channel)
+            return
         await self._run_or_reconnect(
             lambda c: c.switch_on(self._plant_id, device_uuid.encode(), channel)
         )
+        self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = True
         _LOGGER.info("switched on device %s channel %d", device_uuid, channel)
 
     async def async_switch_off(self, device_uuid: str, channel: int = 1) -> None:
         """Switch off a light or plug channel."""
         assert self._plant_id is not None
+        curr = self._channel_states.get((device_uuid, channel), {}).get("is_on")
+        if curr is False:
+            _LOGGER.debug("device %s channel %d already off, skipping toggle", device_uuid, channel)
+            return
         await self._run_or_reconnect(
             lambda c: c.switch_off(self._plant_id, device_uuid.encode(), channel)
         )
+        self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = False
         _LOGGER.info("switched off device %s channel %d", device_uuid, channel)
 
     async def async_set_brightness(self, device_uuid: str, percent: int, channel: int = 1) -> None:
@@ -619,6 +629,9 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         await self._run_or_reconnect(
             lambda c: c.set_brightness(self._plant_id, device_uuid.encode(), percent, channel)
         )
+        ch_state = self._channel_states.setdefault((device_uuid, channel), {})
+        ch_state["is_on"] = (percent > 0)
+        ch_state["brightness"] = round((percent / 100) * 255)
         _LOGGER.info("set brightness on device %s channel %d to %d%%", device_uuid, channel, percent)
 
     async def async_shutdown(self) -> None:

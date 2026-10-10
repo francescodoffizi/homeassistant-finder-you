@@ -289,18 +289,24 @@ def extract_channel_states(payload: bytes) -> dict[tuple[str, int], dict[str, An
             brightness_pct = None
             if 1 in f13_p and isinstance(f13_p[1][0], int):
                 brightness_pct = f13_p[1][0]
-            is_on = bool(brightness_pct is not None and brightness_pct > 0)
+            f11_val = fields.get(11, [None])[0]
+            if f11_val == 3:
+                is_on = True
+            elif f11_val == 2:
+                is_on = False
+            else:
+                is_on = bool(brightness_pct is not None and brightness_pct > 0)
             brightness_val = (
                 round((brightness_pct / 100) * 255) if brightness_pct is not None else None
             )
             out[(dev_uuid, 1)] = {"is_on": is_on, "brightness": brightness_val}
         elif fam in ("1322", "1372"):  # 2-channel Relays / Switches
-            if isinstance(f5, bytes) and len(f5) >= 7:
-                b6 = f5[6]
-                ch1_on = bool(b6 & 0x01)
-                ch2_on = bool(b6 & 0x10) if fam == "1372" else bool(b6 & 0x02)
-                out[(dev_uuid, 1)] = {"is_on": ch1_on, "brightness": None}
-                out[(dev_uuid, 2)] = {"is_on": ch2_on, "brightness": None}
+            f11_val = fields.get(11, [None])[0]
+            f12_val = fields.get(12, [None])[0]
+            ch1_on = (f11_val == 3)
+            ch2_on = (f12_val == 3)
+            out[(dev_uuid, 1)] = {"is_on": ch1_on, "brightness": None}
+            out[(dev_uuid, 2)] = {"is_on": ch2_on, "brightness": None}
     return out
 
 
