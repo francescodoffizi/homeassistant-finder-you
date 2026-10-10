@@ -42,7 +42,7 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
         super().__init__(coordinator)
         self._switch = switch
         self._attr_unique_id = f"{DOMAIN}_switch_{switch.uuid}_{switch.channel}"
-        self._attr_name = switch.name
+        self._attr_name = None
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{switch.uuid}_{switch.channel}")},
             name=switch.name,

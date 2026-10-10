@@ -42,7 +42,7 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
         super().__init__(coordinator)
         self._light = light
         self._attr_unique_id = f"{DOMAIN}_light_{light.uuid}_{light.channel}"
-        self._attr_name = light.name
+        self._attr_name = None
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{light.uuid}_{light.channel}")},
             name=light.name,

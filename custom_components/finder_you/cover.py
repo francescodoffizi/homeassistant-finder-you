@@ -47,7 +47,7 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
         super().__init__(coordinator)
         self._shutter = shutter
         self._attr_unique_id = f"{DOMAIN}_{shutter.uuid}"
-        self._attr_name = shutter.name
+        self._attr_name = None
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, shutter.uuid)},
             name=shutter.name,
