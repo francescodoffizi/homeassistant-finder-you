@@ -107,8 +107,14 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
                 f"YESLY gateway didn't acknowledge the {self._shutter.name} "
                 f"command ({err}). Try power-cycling the gateway if this persists."
             ) from err
-        self._last_commanded_position = target_position
+        # Update with real observed position from coordinator if present
+        observed = self.coordinator.data.get(self._shutter.uuid) if self.coordinator.data else None
+        if observed is not None:
+            self._last_commanded_position = observed
+        else:
+            self._last_commanded_position = target_position
         self.async_write_ha_state()
+
 
     async def async_open_cover(self, **kwargs: Any) -> None:
         await self._send(lambda: self.coordinator.async_open(self._shutter.uuid), 100)
