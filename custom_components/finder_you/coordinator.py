@@ -18,14 +18,17 @@ from .api import (
     FinderHomeClient,
     GatewayOfflineError,
     OAuthError,
+    Scenario,
     Shutter,
     extract_shutter_motion,
     extract_shutter_positions,
     extract_shutter_states,
     fetch_token,
     parse_plant,
+    parse_scenarios,
     refresh_token,
 )
+
 from .const import DEFAULT_SCAN_INTERVAL_SECONDS, DOMAIN
 
 # Minimum gap between consecutive command sends. 250 ms was enough to stop
@@ -104,6 +107,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._plant_id: bytes | None = None
         self._plant_name: str = ""
         self._shutters: list[Shutter] = []
+        self._scenarios: list[Scenario] = []
         # Wedge characterization: track when the gateway last produced
         # fresh telemetry for *any* shutter, so we can tell whether the
         # cloud-to-puck link is alive without needing a user command.
@@ -135,6 +139,11 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
     @property
     def shutters(self) -> list[Shutter]:
         return self._shutters
+
+    @property
+    def scenarios(self) -> list[Scenario]:
+        return self._scenarios
+
 
     @property
     def last_telemetry_change_ts(self) -> float | None:
@@ -239,9 +248,13 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._plant_name = plant_name or self._plant_name
         if shutters:
             self._shutters = shutters
+        scenarios = parse_scenarios(plant_payload)
+        if scenarios:
+            self._scenarios = scenarios
         positions = extract_shutter_positions(plant_payload)
         self._track_telemetry_freshness(plant_payload)
         return {s.uuid: positions.get(s.uuid) for s in self._shutters}
+
 
     def _track_telemetry_freshness(self, plant_payload: bytes) -> None:
         """Update freshness markers and log slice transitions.
@@ -551,7 +564,16 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             lambda c: c.close_full(self._plant_id, shutter_uuid.encode()),
         )
 
+    async def async_activate_scenario(self, scenario_uuid: str) -> None:
+        """Activate a cloud scenario."""
+        assert self._plant_id is not None
+        await self._run_or_reconnect(
+            lambda c: c.activate_scenario(self._plant_id, scenario_uuid.encode())
+        )
+        _LOGGER.info("activated scenario %s", scenario_uuid)
+
     async def async_shutdown(self) -> None:
+
         if self._client:
             await self._client.close()
             self._client = None

@@ -475,7 +475,16 @@ class FinderHomeClient:
         )
         await self._call("CloseFull", body)
 
+    async def activate_scenario(self, plant_id: bytes, scenario_id: bytes) -> None:
+        body = (
+            field_string(1, self._client_info)
+            + field_string(2, plant_id)
+            + field_string(3, scenario_id)
+        )
+        await self._call("ActivateScenario", body)
+
     async def close(self) -> None:
+
         if self._notification_keepalive_task:
             self._notification_keepalive_task.cancel()
         if self._read_task:

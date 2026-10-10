@@ -9,11 +9,13 @@ accepts our control commands.
 from .client import FinderApiError, FinderHomeClient, GatewayOfflineError
 from .oauth import OAuthError, fetch_token, refresh_token
 from .plant import (
+    Scenario,
     Shutter,
     extract_shutter_motion,
     extract_shutter_positions,
     extract_shutter_states,
     parse_plant,
+    parse_scenarios,
 )
 
 __all__ = [
@@ -21,11 +23,14 @@ __all__ = [
     "FinderHomeClient",
     "GatewayOfflineError",
     "OAuthError",
+    "Scenario",
     "Shutter",
     "extract_shutter_motion",
     "extract_shutter_positions",
     "extract_shutter_states",
     "fetch_token",
     "parse_plant",
+    "parse_scenarios",
     "refresh_token",
 ]
+

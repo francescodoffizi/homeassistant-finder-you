@@ -40,11 +40,8 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
     _attr_supported_features = (
         CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.SET_POSITION
     )
-    # The cloud's reply to SetOpenPercent is a synchronous ack — the gateway
-    # drives the motor asynchronously and v1 has no real-time position
-    # feedback. Marking the state as assumed makes HomeKit accept the
-    # commanded position as terminal instead of hanging on "Opening…".
-    _attr_assumed_state = True
+    _attr_assumed_state = False
+
 
     def __init__(self, coordinator: FinderYouCoordinator, shutter: Shutter) -> None:
         super().__init__(coordinator)

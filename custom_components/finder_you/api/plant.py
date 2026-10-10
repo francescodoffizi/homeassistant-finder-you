@@ -32,6 +32,15 @@ class Shutter:
     room: str | None = None
 
 
+@dataclass(frozen=True)
+class Scenario:
+    """A cloud scenario / macro discovered in the plant."""
+
+    uuid: str
+    name: str
+
+
+
 def parse_plant(payload: bytes) -> tuple[str, list[Shutter]]:
     """Extract ``(plant_name, [Shutter, ...])`` from a GetPlant response body.
 
@@ -68,6 +77,36 @@ def parse_plant(payload: bytes) -> tuple[str, list[Shutter]]:
             unique.append(s)
     unique.sort(key=lambda s: s.name.lower())
     return plant_name, unique
+
+
+def parse_scenarios(payload: bytes) -> list[Scenario]:
+    """Extract all cloud scenarios from GetPlant payload."""
+    try:
+        top = parse_fields(payload)
+        plant = parse_fields(top[3][0])
+        items_msg = plant.get(15, [None])[0]
+        if not items_msg or not isinstance(items_msg, bytes):
+            return []
+        sub = parse_fields(items_msg)
+        scenarios: list[Scenario] = []
+        for elem in sub.get(3, []):
+            if not isinstance(elem, bytes):
+                continue
+            f = parse_fields(elem)
+            type_str = ""
+            if 8 in f and isinstance(f[8][0], bytes):
+                t = parse_fields(f[8][0])
+                type_str = t.get(1, [b""])[0].decode(errors="replace")
+            if type_str == "device_scenario":
+                name = f.get(7, [b""])[0].decode(errors="replace")
+                elem_id = f.get(1, [b""])[0].decode(errors="replace")
+                if elem_id and name:
+                    scenarios.append(Scenario(uuid=elem_id, name=name))
+        scenarios.sort(key=lambda sc: sc.name.lower())
+        return scenarios
+    except Exception:
+        return []
+
 
 
 def _walk(payload: bytes, out: list[Shutter]) -> None:
