@@ -40,6 +40,30 @@ class Scenario:
     name: str
 
 
+@dataclass(frozen=True)
+class Light:
+    """A light or dimmer entity discovered in the plant."""
+
+    uuid: str
+    name: str
+    channel: int
+    is_dimmer: bool
+    elem_id: str
+    device_model: str = "YESLY Light"
+    room: str | None = None
+
+
+@dataclass(frozen=True)
+class Switch:
+    """A switch/socket entity discovered in the plant."""
+
+    uuid: str
+    name: str
+    channel: int
+    elem_id: str
+    device_model: str = "YESLY Switch"
+    room: str | None = None
+
 
 def parse_plant(payload: bytes) -> tuple[str, list[Shutter]]:
     """Extract ``(plant_name, [Shutter, ...])`` from a GetPlant response body.
@@ -106,6 +130,79 @@ def parse_scenarios(payload: bytes) -> list[Scenario]:
         return scenarios
     except Exception:
         return []
+
+
+def parse_lights_and_switches(payload: bytes) -> tuple[list[Light], list[Switch]]:
+    """Extract all lights and switches from the plant body."""
+    try:
+        top = parse_fields(payload)
+        plant = parse_fields(top[3][0])
+        f12 = plant.get(12, [])
+        device_fams: dict[str, str] = {}
+        for sub in f12:
+            if not isinstance(sub, bytes):
+                continue
+            sf = parse_fields(sub)
+            u_b = sf.get(1, [None])[0]
+            if isinstance(u_b, bytes):
+                fam_b = sf.get(3, [b""])[0]
+                device_fams[u_b.decode(errors="replace")] = fam_b.decode(errors="replace")
+
+        items_msg = plant.get(15, [None])[0]
+        if not items_msg or not isinstance(items_msg, bytes):
+            return [], []
+        sub = parse_fields(items_msg)
+        lights: list[Light] = []
+        switches: list[Switch] = []
+        for elem in sub.get(3, []):
+            if not isinstance(elem, bytes):
+                continue
+            rf = parse_fields(elem)
+            elem_id = rf.get(1, [b""])[0].decode(errors="replace")
+            name = rf.get(7, [b""])[0].decode(errors="replace")
+            t8 = rf.get(8, [b""])[0]
+            dev_type = ""
+            if isinstance(t8, bytes):
+                dev_type = parse_fields(t8).get(1, [b""])[0].decode(errors="replace")
+            dev_msg = rf.get(2, [b""])[0]
+            dev_uuid = ""
+            if isinstance(dev_msg, bytes):
+                dev_uuid = parse_fields(dev_msg).get(1, [b""])[0].decode(errors="replace")
+            channel = rf.get(3, [1])[0]
+            if not isinstance(channel, int):
+                channel = 1
+
+            fam = device_fams.get(dev_uuid, "")
+            model_name = f"YESLY {fam}" if fam else "YESLY Device"
+
+            if dev_type == "device_light_bulb":
+                is_dimmer = (fam == "1521")
+                lights.append(
+                    Light(
+                        uuid=dev_uuid,
+                        name=name,
+                        channel=channel,
+                        is_dimmer=is_dimmer,
+                        elem_id=elem_id,
+                        device_model=model_name,
+                    )
+                )
+            elif dev_type == "device_plug_socket_europe_2":
+                switches.append(
+                    Switch(
+                        uuid=dev_uuid,
+                        name=name,
+                        channel=channel,
+                        elem_id=elem_id,
+                        device_model=model_name,
+                    )
+                )
+
+        lights.sort(key=lambda x: x.name.lower())
+        switches.sort(key=lambda x: x.name.lower())
+        return lights, switches
+    except Exception:
+        return [], []
 
 
 
@@ -191,12 +288,12 @@ def extract_shutter_motion(payload: bytes) -> dict[str, int]:
 
 
 def _iter_state_submessages(payload: bytes):
-    """Yield ``(submessage_bytes, parsed_fields_dict)`` for each shutter.
+    """Yield ``(submessage_bytes, parsed_fields_dict)`` for each device state submessage.
 
-    The per-shutter state messages live inside the plant body (top-level
-    field 3), attached as repeated entries on field 12 of that body. We
-    filter by the stable field-id schema (avoids matching unrelated
-    messages that happen to share a few fields).
+    The per-device state messages live inside the plant body (top-level
+    field 3), attached as repeated entries on field 12 of that body.
+    Each device state message carries the device UUID as a 36-char string
+    at field 1 and family at field 3.
     """
     try:
         top = parse_fields(payload)
@@ -216,7 +313,8 @@ def _iter_state_submessages(payload: bytes):
             sub_fields = parse_fields(sub)
         except Exception:
             continue
-        if set(sub_fields.keys()) != _STATE_FIELD_SET:
+        uuid_b = sub_fields.get(1, [None])[0]
+        if not isinstance(uuid_b, bytes) or len(uuid_b) != 36:
             continue
         yield sub, sub_fields
 

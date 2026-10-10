@@ -10,5 +10,5 @@ CONF_PLANT_ID = "plant_id"
 
 DEFAULT_SCAN_INTERVAL_SECONDS = 30
 
-PLATFORMS: list[str] = ["cover", "sensor", "scene"]
+PLATFORMS: list[str] = ["cover", "sensor", "scene", "light", "switch"]
 

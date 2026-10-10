@@ -17,13 +17,16 @@ from .api import (
     FinderApiError,
     FinderHomeClient,
     GatewayOfflineError,
+    Light,
     OAuthError,
     Scenario,
     Shutter,
+    Switch,
     extract_shutter_motion,
     extract_shutter_positions,
     extract_shutter_states,
     fetch_token,
+    parse_lights_and_switches,
     parse_plant,
     parse_scenarios,
     refresh_token,
@@ -108,6 +111,8 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._plant_name: str = ""
         self._shutters: list[Shutter] = []
         self._scenarios: list[Scenario] = []
+        self._lights: list[Light] = []
+        self._switches: list[Switch] = []
         # Wedge characterization: track when the gateway last produced
         # fresh telemetry for *any* shutter, so we can tell whether the
         # cloud-to-puck link is alive without needing a user command.
@@ -143,6 +148,14 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
     @property
     def scenarios(self) -> list[Scenario]:
         return self._scenarios
+
+    @property
+    def lights(self) -> list[Light]:
+        return self._lights
+
+    @property
+    def switches(self) -> list[Switch]:
+        return self._switches
 
 
     @property
@@ -251,6 +264,11 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         scenarios = parse_scenarios(plant_payload)
         if scenarios:
             self._scenarios = scenarios
+        lights, switches = parse_lights_and_switches(plant_payload)
+        if lights:
+            self._lights = lights
+        if switches:
+            self._switches = switches
         positions = extract_shutter_positions(plant_payload)
         self._track_telemetry_freshness(plant_payload)
         return {s.uuid: positions.get(s.uuid) for s in self._shutters}
@@ -571,6 +589,30 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             lambda c: c.activate_scenario(self._plant_id, scenario_uuid.encode())
         )
         _LOGGER.info("activated scenario %s", scenario_uuid)
+
+    async def async_switch_on(self, device_uuid: str, channel: int = 1) -> None:
+        """Switch on a light or plug channel."""
+        assert self._plant_id is not None
+        await self._run_or_reconnect(
+            lambda c: c.switch_on(self._plant_id, device_uuid.encode(), channel)
+        )
+        _LOGGER.info("switched on device %s channel %d", device_uuid, channel)
+
+    async def async_switch_off(self, device_uuid: str, channel: int = 1) -> None:
+        """Switch off a light or plug channel."""
+        assert self._plant_id is not None
+        await self._run_or_reconnect(
+            lambda c: c.switch_off(self._plant_id, device_uuid.encode(), channel)
+        )
+        _LOGGER.info("switched off device %s channel %d", device_uuid, channel)
+
+    async def async_set_brightness(self, device_uuid: str, percent: int, channel: int = 1) -> None:
+        """Set brightness level (0-100%) on a dimmer channel."""
+        assert self._plant_id is not None
+        await self._run_or_reconnect(
+            lambda c: c.set_brightness(self._plant_id, device_uuid.encode(), percent, channel)
+        )
+        _LOGGER.info("set brightness on device %s channel %d to %d%%", device_uuid, channel, percent)
 
     async def async_shutdown(self) -> None:
 
