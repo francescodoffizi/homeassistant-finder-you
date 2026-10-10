@@ -55,17 +55,10 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
             model="YESLY Roller Shutter",
             suggested_area=shutter.room,
         )
-        self._last_commanded_position: int = 100
+        self._last_commanded_position: int | None = None
 
     async def async_added_to_hass(self) -> None:
-        """Restore the last commanded position from before HA restarted.
-
-        Without this, HA boots with every cover defaulted to position 100
-        (open). The HomeKit bridge remembers the user's last target
-        (often 0 if they closed everything before bed) and shows the
-        Home tile stuck on "Closing…" forever because CurrentPosition
-        and TargetPosition disagree until the user issues a new command.
-        """
+        """Restore the last position from before HA restarted."""
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         if last is not None:
@@ -75,17 +68,11 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
 
     @property
     def current_cover_position(self) -> int | None:
-        """Return the observed position, falling back to last-commanded.
-
-        ``coordinator.async_set_position`` blocks until the gateway's
-        plant cache confirms the action, so by the time HomeKit asks for
-        the position after a successful command the observed value will
-        already reflect it. The last-commanded fallback only kicks in
-        when the coordinator hasn't populated data yet (e.g. just after
-        startup).
-        """
+        """Return observed position from coordinator, falling back to restored state."""
         observed = self.coordinator.data.get(self._shutter.uuid) if self.coordinator.data else None
-        return observed if observed is not None else self._last_commanded_position
+        if observed is not None:
+            return observed
+        return self._last_commanded_position
 
     @property
     def is_closed(self) -> bool | None:
