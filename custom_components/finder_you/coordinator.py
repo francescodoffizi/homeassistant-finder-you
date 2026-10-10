@@ -497,29 +497,21 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             self._last_successful_command_ts = time.time()
             await self.async_request_refresh()
             return
-        if baseline_position is None and self._telemetry_recent():
-            # The cloud doesn't have a position cached for this shutter
-            # but the gateway is producing fresh slice diffs for *other*
-            # shutters, so the puck is alive — the empty field just means
-            # this particular shutter's telemetry has expired in the
-            # cloud cache. Verifying by motor evidence would time out:
-            # the most common reason for an expired-cache shutter to
-            # receive a close command is that it's already closed (the
-            # scene fired on everything). Accept the send optimistically
-            # and let the next coordinator poll correct any false
-            # success. This is the path that fixed "already-closed
-            # shutters stuck on Closing… for 9 minutes." Increments the
-            # suspicion counter because we have *no* evidence this
-            # particular send reached the motor: it could be a true
-            # no-op OR a silent failure (another app holds live-client
-            # status). The counter triggers a reclaim handshake after
-            # ``PREEMPTIVE_HANDSHAKE_UNVERIFIED_SENDS`` in a row.
-            self._unverified_send_count += 1
-            _LOGGER.debug(
-                "%s baseline unknown but telemetry fresh — treating as no-op (suspicion %d)",
-                shutter_uuid,
-                self._unverified_send_count,
-            )
+        if baseline_position is None:
+            # Shutters without telemetry in plant cache (or whose telemetry
+            # has expired) don't report position or baseline.
+            # Check briefly for motor movement (motion flag 3 or position appearance).
+            # If not detected within a short window, accept optimistically.
+            if await self._wait_for_motor_evidence(shutter_uuid, baseline_position, timeout=6.0):
+                self._unverified_send_count = 0
+                _LOGGER.debug("%s baseline unknown but motor movement observed", shutter_uuid)
+            else:
+                self._unverified_send_count += 1
+                _LOGGER.debug(
+                    "%s baseline unknown and no motor movement within 6s — treating as accepted/no-op (suspicion %d)",
+                    shutter_uuid,
+                    self._unverified_send_count,
+                )
             self._last_successful_command_ts = time.time()
             await self.async_request_refresh()
             return
@@ -537,7 +529,10 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         await self.async_request_refresh()
 
     async def _wait_for_motor_evidence(
-        self, shutter_uuid: str, baseline_position: int | None
+        self,
+        shutter_uuid: str,
+        baseline_position: int | None,
+        timeout: float = VERIFY_TIMEOUT,
     ) -> bool:
         """Poll the plant for proof the shutter motor actually ran.
 
@@ -551,7 +546,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             position telemetry and doesn't need a baseline; the only way
             we'd observe 3 is if the BLE-mesh hop reached the shutter.
         """
-        deadline = asyncio.get_event_loop().time() + VERIFY_TIMEOUT
+        deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(VERIFY_POLL_INTERVAL)
             try:
