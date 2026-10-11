@@ -144,8 +144,8 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         # rehandshake to reclaim it.
         self._unverified_send_count: int = 0
 
-        # Local-First BLE Direct Mesh Routing
-        self._enable_local_ble: bool = True
+        # Local-First BLE Direct Mesh Routing (disabled for discrete on/off reliability)
+        self._enable_local_ble: bool = False
         self._ble_inventory: dict[str, BleDirectDevice] = {}
         self._topology_router = FinderTopologyRouter(hass)
         self._topology_router.start()
