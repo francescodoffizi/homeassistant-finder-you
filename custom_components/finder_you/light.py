@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from homeassistant.components.light import (
@@ -19,6 +20,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .api import Light
 from .const import DOMAIN
 from .coordinator import FinderYouCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -62,6 +65,14 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        # Seed from live coordinator channel state first if available
+        channel_data = self.coordinator.channel_states.get((self._light.uuid, self._light.channel))
+        if channel_data is not None and "is_on" in channel_data:
+            self._is_on = channel_data["is_on"]
+            if self._light.is_dimmer and channel_data.get("brightness") is not None:
+                self._brightness = channel_data["brightness"]
+            return
+
         last = await self.async_get_last_state()
         if last is not None:
             self._is_on = (last.state == "on")
@@ -89,11 +100,10 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the light, optionally adjusting brightness."""
-        self._is_on = True
         if self._light.is_dimmer and ATTR_BRIGHTNESS in kwargs:
             raw_val = kwargs[ATTR_BRIGHTNESS]
             self._brightness = raw_val
-            # Optimistically update coordinator channel state
+            self._is_on = True
             self.coordinator.channel_states.setdefault((self._light.uuid, self._light.channel), {})["is_on"] = True
             self.coordinator.channel_states[(self._light.uuid, self._light.channel)]["brightness"] = raw_val
             self.async_write_ha_state()
@@ -101,15 +111,27 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
             await self.coordinator.async_set_brightness(
                 self._light.uuid, percent, self._light.channel
             )
-        else:
-            self.coordinator.channel_states.setdefault((self._light.uuid, self._light.channel), {})["is_on"] = True
-            self.async_write_ha_state()
-            await self.coordinator.async_switch_on(
-                self._light.uuid, self._light.channel
-            )
+            return
+
+        # Discrete Check: if already on, do not send toggle click
+        if self.is_on:
+            _LOGGER.debug("%s is already ON, skipping toggle", self.entity_id)
+            return
+
+        self._is_on = True
+        self.coordinator.channel_states.setdefault((self._light.uuid, self._light.channel), {})["is_on"] = True
+        self.async_write_ha_state()
+        await self.coordinator.async_switch_on(
+            self._light.uuid, self._light.channel
+        )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
+        # Discrete Check: if already off, do not send toggle click
+        if not self.is_on:
+            _LOGGER.debug("%s is already OFF, skipping toggle", self.entity_id)
+            return
+
         self._is_on = False
         self.coordinator.channel_states.setdefault((self._light.uuid, self._light.channel), {})["is_on"] = False
         self.async_write_ha_state()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from homeassistant.components.switch import (
@@ -18,6 +19,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .api import Switch
 from .const import DOMAIN
 from .coordinator import FinderYouCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -53,6 +56,12 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
+        # Seed from live coordinator channel state first if available
+        channel_data = self.coordinator.channel_states.get((self._switch.uuid, self._switch.channel))
+        if channel_data is not None and "is_on" in channel_data:
+            self._is_on = channel_data["is_on"]
+            return
+
         last = await self.async_get_last_state()
         if last is not None:
             self._is_on = (last.state == "on")
@@ -66,6 +75,10 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the switch."""
+        if self.is_on:
+            _LOGGER.debug("%s is already ON, skipping toggle", self.entity_id)
+            return
+
         self._is_on = True
         self.coordinator.channel_states.setdefault((self._switch.uuid, self._switch.channel), {})["is_on"] = True
         self.async_write_ha_state()
@@ -75,6 +88,10 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the switch."""
+        if not self.is_on:
+            _LOGGER.debug("%s is already OFF, skipping toggle", self.entity_id)
+            return
+
         self._is_on = False
         self.coordinator.channel_states.setdefault((self._switch.uuid, self._switch.channel), {})["is_on"] = False
         self.async_write_ha_state()

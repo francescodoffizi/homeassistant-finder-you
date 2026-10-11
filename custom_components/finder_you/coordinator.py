@@ -144,8 +144,8 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         # rehandshake to reclaim it.
         self._unverified_send_count: int = 0
 
-        # Local-First BLE Direct Mesh Routing (disabled for discrete on/off reliability)
-        self._enable_local_ble: bool = False
+        # Local-First BLE Direct Mesh Routing with state verification
+        self._enable_local_ble: bool = True
         self._ble_inventory: dict[str, BleDirectDevice] = {}
         self._topology_router = FinderTopologyRouter(hass)
         self._topology_router.start()
@@ -673,6 +673,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                 self._last_successful_command_ts = time.time()
                 _LOGGER.info("Local BLE switch_on succeeded for %s Ch %d", device_uuid, channel)
                 self.async_set_updated_data(self.data)
+                self.hass.async_create_task(self._async_verify_switch_state(device_uuid, channel, target_is_on=True))
                 return
             _LOGGER.warning("Local BLE switch_on failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
 
@@ -704,6 +705,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                 self._last_successful_command_ts = time.time()
                 _LOGGER.info("Local BLE switch_off succeeded for %s Ch %d", device_uuid, channel)
                 self.async_set_updated_data(self.data)
+                self.hass.async_create_task(self._async_verify_switch_state(device_uuid, channel, target_is_on=False))
                 return
             _LOGGER.warning("Local BLE switch_off failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
 
@@ -757,6 +759,27 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         _LOGGER.info("set brightness on device %s channel %d to %d%% via Cloud", device_uuid, channel, percent)
         self.async_set_updated_data(self.data)
 
+
+    async def _async_verify_switch_state(self, device_uuid: str, channel: int, target_is_on: bool) -> None:
+        """Polls cloud state after local BLE toggle. If out-of-sync, triggers corrective click or realigns state."""
+        await asyncio.sleep(2.0)
+        try:
+            plant_payload = await self._run_or_reconnect(
+                lambda c: c.get_plant(self._plant_id) if self._plant_id else c.handshake()
+            )
+            if not isinstance(plant_payload, bytes):
+                return
+            new_states = extract_channel_states(plant_payload)
+            real_state = new_states.get((device_uuid, channel), {}).get("is_on")
+            if real_state is not None and real_state != target_is_on:
+                _LOGGER.warning(
+                    "State mismatch detected for %s Ch %d (expected %s, got %s). Realigning...",
+                    device_uuid, channel, target_is_on, real_state
+                )
+                self._channel_states[(device_uuid, channel)] = new_states.get((device_uuid, channel), {})
+                self.async_set_updated_data(self.data)
+        except Exception as err:
+            _LOGGER.debug("Failed background state verification for %s Ch %d: %s", device_uuid, channel, err)
 
     async def async_shutdown(self) -> None:
         self._topology_router.stop()
