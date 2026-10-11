@@ -760,8 +760,33 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self.async_set_updated_data(self.data)
 
 
+    async def _send_cloud_switch(self, device_uuid: str, channel: int, target_is_on: bool) -> None:
+        """Helper to send cloud switch on/off command."""
+        assert self._plant_id is not None
+        if self._should_preemptive_rehandshake():
+            _LOGGER.info("preemptive rehandshake before fallback cloud switch")
+            await self._drop_client()
+        async with self._send_lock:
+            loop = asyncio.get_event_loop()
+            wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            if target_is_on:
+                await self._run_or_reconnect(
+                    lambda c: c.switch_on(self._plant_id, device_uuid.encode(), channel)
+                )
+            else:
+                await self._run_or_reconnect(
+                    lambda c: c.switch_off(self._plant_id, device_uuid.encode(), channel)
+                )
+            self._last_send_ts = asyncio.get_event_loop().time()
+        self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = target_is_on
+        self._last_successful_command_ts = time.time()
+        _LOGGER.info("Cloud fallback completed for %s Ch %d (target: %s)", device_uuid, channel, target_is_on)
+        self.async_set_updated_data(self.data)
+
     async def _async_verify_switch_state(self, device_uuid: str, channel: int, target_is_on: bool) -> None:
-        """Polls cloud state after local BLE toggle. If out-of-sync, triggers corrective click or realigns state."""
+        """Polls cloud state after local BLE toggle. If out-of-sync, triggers cloud fallback."""
         await asyncio.sleep(2.0)
         try:
             plant_payload = await self._run_or_reconnect(
@@ -773,11 +798,10 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             real_state = new_states.get((device_uuid, channel), {}).get("is_on")
             if real_state is not None and real_state != target_is_on:
                 _LOGGER.warning(
-                    "State mismatch detected for %s Ch %d (expected %s, got %s). Realigning...",
+                    "State mismatch detected for %s Ch %d (expected %s, got %s). Triggering active Cloud Fallback...",
                     device_uuid, channel, target_is_on, real_state
                 )
-                self._channel_states[(device_uuid, channel)] = new_states.get((device_uuid, channel), {})
-                self.async_set_updated_data(self.data)
+                await self._send_cloud_switch(device_uuid, channel, target_is_on)
         except Exception as err:
             _LOGGER.debug("Failed background state verification for %s Ch %d: %s", device_uuid, channel, err)
 
