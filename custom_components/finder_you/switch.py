@@ -66,16 +66,18 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the switch."""
+        self._is_on = True
+        self.coordinator.channel_states.setdefault((self._switch.uuid, self._switch.channel), {})["is_on"] = True
+        self.async_write_ha_state()
         await self.coordinator.async_switch_on(
             self._switch.uuid, self._switch.channel
         )
-        self._is_on = True
-        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the switch."""
+        self._is_on = False
+        self.coordinator.channel_states.setdefault((self._switch.uuid, self._switch.channel), {})["is_on"] = False
+        self.async_write_ha_state()
         await self.coordinator.async_switch_off(
             self._switch.uuid, self._switch.channel
         )
-        self._is_on = False
-        self.async_write_ha_state()

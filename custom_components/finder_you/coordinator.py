@@ -607,7 +607,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = True
         self._last_successful_command_ts = time.time()
         _LOGGER.info("switched on device %s channel %d", device_uuid, channel)
-        await self.async_request_refresh()
+        self.async_set_updated_data(self.data)
 
     async def async_switch_off(self, device_uuid: str, channel: int = 1) -> None:
         """Switch off a light or plug channel."""
@@ -624,7 +624,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = False
         self._last_successful_command_ts = time.time()
         _LOGGER.info("switched off device %s channel %d", device_uuid, channel)
-        await self.async_request_refresh()
+        self.async_set_updated_data(self.data)
 
     async def async_set_brightness(self, device_uuid: str, percent: int, channel: int = 1) -> None:
         """Set brightness level (0-100%) on a dimmer channel."""
@@ -643,7 +643,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         ch_state["brightness"] = round((percent / 100) * 255)
         self._last_successful_command_ts = time.time()
         _LOGGER.info("set brightness on device %s channel %d to %d%%", device_uuid, channel, percent)
-        await self.async_request_refresh()
+        self.async_set_updated_data(self.data)
 
     async def async_shutdown(self) -> None:
 

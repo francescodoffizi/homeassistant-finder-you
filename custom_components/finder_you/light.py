@@ -89,25 +89,30 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the light, optionally adjusting brightness."""
+        self._is_on = True
         if self._light.is_dimmer and ATTR_BRIGHTNESS in kwargs:
             raw_val = kwargs[ATTR_BRIGHTNESS]
             self._brightness = raw_val
-            # Scale 0-255 to 0-100%
+            # Optimistically update coordinator channel state
+            self.coordinator.channel_states.setdefault((self._light.uuid, self._light.channel), {})["is_on"] = True
+            self.coordinator.channel_states[(self._light.uuid, self._light.channel)]["brightness"] = raw_val
+            self.async_write_ha_state()
             percent = max(1, min(100, round((raw_val / 255) * 100)))
             await self.coordinator.async_set_brightness(
                 self._light.uuid, percent, self._light.channel
             )
         else:
+            self.coordinator.channel_states.setdefault((self._light.uuid, self._light.channel), {})["is_on"] = True
+            self.async_write_ha_state()
             await self.coordinator.async_switch_on(
                 self._light.uuid, self._light.channel
             )
-        self._is_on = True
-        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
+        self._is_on = False
+        self.coordinator.channel_states.setdefault((self._light.uuid, self._light.channel), {})["is_on"] = False
+        self.async_write_ha_state()
         await self.coordinator.async_switch_off(
             self._light.uuid, self._light.channel
         )
-        self._is_on = False
-        self.async_write_ha_state()
