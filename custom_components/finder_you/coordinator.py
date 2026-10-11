@@ -595,6 +595,9 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
     async def async_switch_on(self, device_uuid: str, channel: int = 1) -> None:
         """Switch on a light or plug channel."""
         assert self._plant_id is not None
+        if self._should_preemptive_rehandshake():
+            _LOGGER.info("preemptive rehandshake before switch_on")
+            await self._drop_client()
         async with self._send_lock:
             loop = asyncio.get_event_loop()
             wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
@@ -612,6 +615,9 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
     async def async_switch_off(self, device_uuid: str, channel: int = 1) -> None:
         """Switch off a light or plug channel."""
         assert self._plant_id is not None
+        if self._should_preemptive_rehandshake():
+            _LOGGER.info("preemptive rehandshake before switch_off")
+            await self._drop_client()
         async with self._send_lock:
             loop = asyncio.get_event_loop()
             wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
