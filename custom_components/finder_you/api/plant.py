@@ -66,6 +66,70 @@ class Switch:
     room: str | None = None
 
 
+@dataclass(frozen=True)
+class BleDirectDevice:
+    """A device ready for direct local BLE mesh communication."""
+
+    uuid: str
+    mac: str
+    family: str
+    key: str  # AES-128 hex string (32 chars)
+
+
+def extract_ble_inventory(plant_payload: bytes) -> dict[str, BleDirectDevice]:
+    """Extract all BLE-capable devices with their MAC and Master AES-128 key."""
+    try:
+        top = parse_fields(plant_payload)
+        if 3 not in top or not isinstance(top[3][0], bytes):
+            return {}
+        plant = parse_fields(top[3][0])
+
+        hw_map: dict[str, dict[str, str]] = {}
+        for item in plant.get(12, []):
+            if not isinstance(item, bytes):
+                continue
+            sub = parse_fields(item)
+            u_b = sub.get(1, [b""])[0]
+            fam_b = sub.get(3, [b""])[0]
+            f4 = sub.get(4, [b""])[0]
+            mac = ""
+            if isinstance(f4, bytes):
+                mac = parse_fields(f4).get(1, [b""])[0].decode(errors="ignore")
+            u = u_b.decode(errors="ignore") if isinstance(u_b, bytes) else ""
+            fam = fam_b.decode(errors="ignore") if isinstance(fam_b, bytes) else ""
+            if u:
+                hw_map[u] = {"mac": mac, "family": fam}
+
+        keys_map: dict[str, str] = {}
+        for item in plant.get(11, []):
+            if not isinstance(item, bytes):
+                continue
+            sub = parse_fields(item)
+            k_type = sub.get(2, [b""])[0].decode(errors="ignore")
+            f3 = sub.get(3, [b""])
+            target_uuid = ""
+            if f3 and isinstance(f3[0], bytes):
+                target_uuid = parse_fields(f3[0]).get(1, [b""])[0].decode(errors="ignore")
+            raw_key = sub.get(7, [b""])[0]
+            key_hex = raw_key.hex() if isinstance(raw_key, bytes) else ""
+            if target_uuid and key_hex and k_type == "AES128/MASTER":
+                keys_map[target_uuid] = key_hex
+
+        inventory: dict[str, BleDirectDevice] = {}
+        for u, hw in hw_map.items():
+            if u in keys_map and hw.get("mac"):
+                inventory[u] = BleDirectDevice(
+                    uuid=u,
+                    mac=hw["mac"],
+                    family=hw["family"],
+                    key=keys_map[u],
+                )
+        return inventory
+    except Exception:
+        return {}
+
+
+
 def parse_plant(payload: bytes) -> tuple[str, list[Shutter]]:
     """Extract ``(plant_name, [Shutter, ...])`` from a GetPlant response body.
 

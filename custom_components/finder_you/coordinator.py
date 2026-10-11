@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import (
+    BleDirectDevice,
     FinderApiError,
     FinderHomeClient,
     GatewayOfflineError,
@@ -22,6 +23,7 @@ from .api import (
     Scenario,
     Shutter,
     Switch,
+    extract_ble_inventory,
     extract_channel_states,
     extract_shutter_motion,
     extract_shutter_positions,
@@ -33,7 +35,14 @@ from .api import (
     refresh_token,
 )
 
-from .const import DEFAULT_SCAN_INTERVAL_SECONDS, DOMAIN
+from .const import (
+    CONF_ENABLE_LOCAL_BLE,
+    DEFAULT_ENABLE_LOCAL_BLE,
+    DEFAULT_SCAN_INTERVAL_SECONDS,
+    DOMAIN,
+)
+from .topology import FinderTopologyRouter
+
 
 # Minimum gap between consecutive command sends. 250 ms was enough to stop
 # the WiFi-side burst, but during 6-shutter scenes the gateway's BLE-mesh
@@ -134,6 +143,21 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         # we assume another app stole the live-client slot and force a
         # rehandshake to reclaim it.
         self._unverified_send_count: int = 0
+
+        # Local-First BLE Direct Mesh Routing
+        self._enable_local_ble: bool = True
+        self._ble_inventory: dict[str, BleDirectDevice] = {}
+        self._topology_router = FinderTopologyRouter(hass)
+        self._topology_router.start()
+
+    @property
+    def topology_router(self) -> FinderTopologyRouter:
+        return self._topology_router
+
+    @property
+    def ble_inventory(self) -> dict[str, BleDirectDevice]:
+        return self._ble_inventory
+
 
     @property
     def plant_id(self) -> bytes | None:
@@ -277,8 +301,15 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             self._switches = switches
         self._channel_states = extract_channel_states(plant_payload)
         positions = extract_shutter_positions(plant_payload)
+        
+        # Populate BLE direct inventory (MAC, family, Master AES-128 key)
+        ble_inv = extract_ble_inventory(plant_payload)
+        if ble_inv:
+            self._ble_inventory = ble_inv
+
         self._track_telemetry_freshness(plant_payload)
         return {s.uuid: positions.get(s.uuid) for s in self._shutters}
+
 
 
     def _track_telemetry_freshness(self, plant_payload: bytes) -> None:
@@ -561,6 +592,19 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         return False
 
     async def async_set_position(self, shutter_uuid: str, percent: int) -> None:
+        """Set shutter position (0-100%) with Local-First BLE routing and cloud fallback."""
+        if self._enable_local_ble and shutter_uuid in self._ble_inventory:
+            ble_dev = self._ble_inventory[shutter_uuid]
+            _LOGGER.info("Attempting Local BLE direct position %d%% for %s (%s)", percent, shutter_uuid, ble_dev.mac)
+            if await self._topology_router.async_dispatch_set_percent(ble_dev, percent):
+                self._last_successful_command_ts = time.time()
+                # Optimistic position update in coordinator data
+                if self.data is not None:
+                    self.data[shutter_uuid] = percent
+                self.async_set_updated_data(self.data)
+                return
+            _LOGGER.warning("Local BLE set_position failed for %s, falling back to Finder Cloud", shutter_uuid)
+
         assert self._plant_id is not None
         await self._send_command(
             shutter_uuid,
@@ -569,6 +613,19 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         )
 
     async def async_open(self, shutter_uuid: str) -> None:
+        """Open shutter full with Local-First BLE routing and cloud fallback."""
+        if self._enable_local_ble and shutter_uuid in self._ble_inventory:
+            ble_dev = self._ble_inventory[shutter_uuid]
+            _LOGGER.info("Attempting Local BLE direct open full for %s (%s)", shutter_uuid, ble_dev.mac)
+            # Shutter open full is channel 1 click
+            if await self._topology_router.async_dispatch_click(ble_dev, 1):
+                self._last_successful_command_ts = time.time()
+                if self.data is not None:
+                    self.data[shutter_uuid] = 100
+                self.async_set_updated_data(self.data)
+                return
+            _LOGGER.warning("Local BLE open failed for %s, falling back to Finder Cloud", shutter_uuid)
+
         assert self._plant_id is not None
         await self._send_command(
             shutter_uuid,
@@ -577,12 +634,26 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         )
 
     async def async_close_shutter(self, shutter_uuid: str) -> None:
+        """Close shutter full with Local-First BLE routing and cloud fallback."""
+        if self._enable_local_ble and shutter_uuid in self._ble_inventory:
+            ble_dev = self._ble_inventory[shutter_uuid]
+            _LOGGER.info("Attempting Local BLE direct close full for %s (%s)", shutter_uuid, ble_dev.mac)
+            # Shutter close full is channel 2 click
+            if await self._topology_router.async_dispatch_click(ble_dev, 2):
+                self._last_successful_command_ts = time.time()
+                if self.data is not None:
+                    self.data[shutter_uuid] = 0
+                self.async_set_updated_data(self.data)
+                return
+            _LOGGER.warning("Local BLE close failed for %s, falling back to Finder Cloud", shutter_uuid)
+
         assert self._plant_id is not None
         await self._send_command(
             shutter_uuid,
             0,
             lambda c: c.close_full(self._plant_id, shutter_uuid.encode()),
         )
+
 
     async def async_activate_scenario(self, scenario_uuid: str) -> None:
         """Activate a cloud scenario."""
@@ -593,7 +664,18 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         _LOGGER.info("activated scenario %s", scenario_uuid)
 
     async def async_switch_on(self, device_uuid: str, channel: int = 1) -> None:
-        """Switch on a light or plug channel."""
+        """Switch on a light or plug channel with Local-First BLE routing and cloud fallback."""
+        if self._enable_local_ble and device_uuid in self._ble_inventory:
+            ble_dev = self._ble_inventory[device_uuid]
+            _LOGGER.info("Attempting Local BLE direct switch_on for %s Ch %d (%s)", device_uuid, channel, ble_dev.mac)
+            if await self._topology_router.async_dispatch_click(ble_dev, channel):
+                self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = True
+                self._last_successful_command_ts = time.time()
+                _LOGGER.info("Local BLE switch_on succeeded for %s Ch %d", device_uuid, channel)
+                self.async_set_updated_data(self.data)
+                return
+            _LOGGER.warning("Local BLE switch_on failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
+
         assert self._plant_id is not None
         if self._should_preemptive_rehandshake():
             _LOGGER.info("preemptive rehandshake before switch_on")
@@ -609,11 +691,22 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             self._last_send_ts = asyncio.get_event_loop().time()
         self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = True
         self._last_successful_command_ts = time.time()
-        _LOGGER.info("switched on device %s channel %d", device_uuid, channel)
+        _LOGGER.info("switched on device %s channel %d via Cloud", device_uuid, channel)
         self.async_set_updated_data(self.data)
 
     async def async_switch_off(self, device_uuid: str, channel: int = 1) -> None:
-        """Switch off a light or plug channel."""
+        """Switch off a light or plug channel with Local-First BLE routing and cloud fallback."""
+        if self._enable_local_ble and device_uuid in self._ble_inventory:
+            ble_dev = self._ble_inventory[device_uuid]
+            _LOGGER.info("Attempting Local BLE direct switch_off for %s Ch %d (%s)", device_uuid, channel, ble_dev.mac)
+            if await self._topology_router.async_dispatch_click(ble_dev, channel):
+                self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = False
+                self._last_successful_command_ts = time.time()
+                _LOGGER.info("Local BLE switch_off succeeded for %s Ch %d", device_uuid, channel)
+                self.async_set_updated_data(self.data)
+                return
+            _LOGGER.warning("Local BLE switch_off failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
+
         assert self._plant_id is not None
         if self._should_preemptive_rehandshake():
             _LOGGER.info("preemptive rehandshake before switch_off")
@@ -629,11 +722,24 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             self._last_send_ts = asyncio.get_event_loop().time()
         self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = False
         self._last_successful_command_ts = time.time()
-        _LOGGER.info("switched off device %s channel %d", device_uuid, channel)
+        _LOGGER.info("switched off device %s channel %d via Cloud", device_uuid, channel)
         self.async_set_updated_data(self.data)
 
     async def async_set_brightness(self, device_uuid: str, percent: int, channel: int = 1) -> None:
-        """Set brightness level (0-100%) on a dimmer channel."""
+        """Set brightness level (0-100%) on a dimmer channel with Local-First BLE routing and cloud fallback."""
+        if self._enable_local_ble and device_uuid in self._ble_inventory:
+            ble_dev = self._ble_inventory[device_uuid]
+            _LOGGER.info("Attempting Local BLE direct brightness %d%% for %s (%s)", percent, device_uuid, ble_dev.mac)
+            if await self._topology_router.async_dispatch_set_percent(ble_dev, percent):
+                ch_state = self._channel_states.setdefault((device_uuid, channel), {})
+                ch_state["is_on"] = (percent > 0)
+                ch_state["brightness"] = round((percent / 100) * 255)
+                self._last_successful_command_ts = time.time()
+                _LOGGER.info("Local BLE set_brightness succeeded for %s to %d%%", device_uuid, percent)
+                self.async_set_updated_data(self.data)
+                return
+            _LOGGER.warning("Local BLE set_brightness failed for %s, falling back to Finder Cloud", device_uuid)
+
         assert self._plant_id is not None
         async with self._send_lock:
             loop = asyncio.get_event_loop()
@@ -648,11 +754,13 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         ch_state["is_on"] = (percent > 0)
         ch_state["brightness"] = round((percent / 100) * 255)
         self._last_successful_command_ts = time.time()
-        _LOGGER.info("set brightness on device %s channel %d to %d%%", device_uuid, channel, percent)
+        _LOGGER.info("set brightness on device %s channel %d to %d%% via Cloud", device_uuid, channel, percent)
         self.async_set_updated_data(self.data)
 
-    async def async_shutdown(self) -> None:
 
+    async def async_shutdown(self) -> None:
+        self._topology_router.stop()
         if self._client:
             await self._client.close()
             self._client = None
+

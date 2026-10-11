@@ -9,10 +9,12 @@ accepts our control commands.
 from .client import FinderApiError, FinderHomeClient, GatewayOfflineError
 from .oauth import OAuthError, fetch_token, refresh_token
 from .plant import (
+    BleDirectDevice,
     Light,
     Scenario,
     Shutter,
     Switch,
+    extract_ble_inventory,
     extract_channel_states,
     extract_shutter_motion,
     extract_shutter_positions,
@@ -23,6 +25,7 @@ from .plant import (
 )
 
 __all__ = [
+    "BleDirectDevice",
     "FinderApiError",
     "FinderHomeClient",
     "GatewayOfflineError",
@@ -31,6 +34,7 @@ __all__ = [
     "Scenario",
     "Shutter",
     "Switch",
+    "extract_ble_inventory",
     "extract_channel_states",
     "extract_shutter_motion",
     "extract_shutter_positions",
@@ -41,4 +45,5 @@ __all__ = [
     "parse_scenarios",
     "refresh_token",
 ]
+
 
