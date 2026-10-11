@@ -74,7 +74,8 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
     def is_on(self) -> bool:
         channel_data = self.coordinator.channel_states.get((self._light.uuid, self._light.channel))
         if channel_data is not None and "is_on" in channel_data:
-            return channel_data["is_on"]
+            self._is_on = channel_data["is_on"]
+            return self._is_on
         return self._is_on
 
     @property

@@ -595,39 +595,55 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
     async def async_switch_on(self, device_uuid: str, channel: int = 1) -> None:
         """Switch on a light or plug channel."""
         assert self._plant_id is not None
-        curr = self._channel_states.get((device_uuid, channel), {}).get("is_on")
-        if curr is True:
-            _LOGGER.debug("device %s channel %d already on, skipping toggle", device_uuid, channel)
-            return
-        await self._run_or_reconnect(
-            lambda c: c.switch_on(self._plant_id, device_uuid.encode(), channel)
-        )
+        async with self._send_lock:
+            loop = asyncio.get_event_loop()
+            wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await self._run_or_reconnect(
+                lambda c: c.switch_on(self._plant_id, device_uuid.encode(), channel)
+            )
+            self._last_send_ts = asyncio.get_event_loop().time()
         self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = True
+        self._last_successful_command_ts = time.time()
         _LOGGER.info("switched on device %s channel %d", device_uuid, channel)
+        await self.async_request_refresh()
 
     async def async_switch_off(self, device_uuid: str, channel: int = 1) -> None:
         """Switch off a light or plug channel."""
         assert self._plant_id is not None
-        curr = self._channel_states.get((device_uuid, channel), {}).get("is_on")
-        if curr is False:
-            _LOGGER.debug("device %s channel %d already off, skipping toggle", device_uuid, channel)
-            return
-        await self._run_or_reconnect(
-            lambda c: c.switch_off(self._plant_id, device_uuid.encode(), channel)
-        )
+        async with self._send_lock:
+            loop = asyncio.get_event_loop()
+            wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await self._run_or_reconnect(
+                lambda c: c.switch_off(self._plant_id, device_uuid.encode(), channel)
+            )
+            self._last_send_ts = asyncio.get_event_loop().time()
         self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = False
+        self._last_successful_command_ts = time.time()
         _LOGGER.info("switched off device %s channel %d", device_uuid, channel)
+        await self.async_request_refresh()
 
     async def async_set_brightness(self, device_uuid: str, percent: int, channel: int = 1) -> None:
         """Set brightness level (0-100%) on a dimmer channel."""
         assert self._plant_id is not None
-        await self._run_or_reconnect(
-            lambda c: c.set_brightness(self._plant_id, device_uuid.encode(), percent, channel)
-        )
+        async with self._send_lock:
+            loop = asyncio.get_event_loop()
+            wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await self._run_or_reconnect(
+                lambda c: c.set_brightness(self._plant_id, device_uuid.encode(), percent, channel)
+            )
+            self._last_send_ts = asyncio.get_event_loop().time()
         ch_state = self._channel_states.setdefault((device_uuid, channel), {})
         ch_state["is_on"] = (percent > 0)
         ch_state["brightness"] = round((percent / 100) * 255)
+        self._last_successful_command_ts = time.time()
         _LOGGER.info("set brightness on device %s channel %d to %d%%", device_uuid, channel, percent)
+        await self.async_request_refresh()
 
     async def async_shutdown(self) -> None:
 
