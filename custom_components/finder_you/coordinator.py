@@ -673,6 +673,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         key = (device_uuid, channel)
         self._syncing_channels.add(key)
         self.async_set_updated_data(self.data)
+        verify_scheduled = False
         try:
             if self._enable_local_ble and device_uuid in self._ble_inventory:
                 ble_dev = self._ble_inventory[device_uuid]
@@ -683,6 +684,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                     _LOGGER.info("Local BLE switch_on succeeded for %s Ch %d", device_uuid, channel)
                     self.async_set_updated_data(self.data)
                     self.hass.async_create_task(self._async_verify_switch_state(device_uuid, channel, target_is_on=True))
+                    verify_scheduled = True
                     return
                 _LOGGER.warning("Local BLE switch_on failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
 
@@ -704,8 +706,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.info("switched on device %s channel %d via Cloud", device_uuid, channel)
             self.async_set_updated_data(self.data)
         finally:
-            # If not waiting for background verify task, clear syncing
-            if not (self._enable_local_ble and device_uuid in self._ble_inventory):
+            if not verify_scheduled:
                 self._syncing_channels.discard(key)
                 self.async_set_updated_data(self.data)
 
@@ -714,6 +715,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         key = (device_uuid, channel)
         self._syncing_channels.add(key)
         self.async_set_updated_data(self.data)
+        verify_scheduled = False
         try:
             if self._enable_local_ble and device_uuid in self._ble_inventory:
                 ble_dev = self._ble_inventory[device_uuid]
@@ -724,6 +726,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                     _LOGGER.info("Local BLE switch_off succeeded for %s Ch %d", device_uuid, channel)
                     self.async_set_updated_data(self.data)
                     self.hass.async_create_task(self._async_verify_switch_state(device_uuid, channel, target_is_on=False))
+                    verify_scheduled = True
                     return
                 _LOGGER.warning("Local BLE switch_off failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
 
@@ -745,7 +748,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.info("switched off device %s channel %d via Cloud", device_uuid, channel)
             self.async_set_updated_data(self.data)
         finally:
-            if not (self._enable_local_ble and device_uuid in self._ble_inventory):
+            if not verify_scheduled:
                 self._syncing_channels.discard(key)
                 self.async_set_updated_data(self.data)
 

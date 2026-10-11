@@ -6,6 +6,7 @@ distributed throughout the home, and routes local commands through the best hop.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Any
