@@ -30,8 +30,6 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: FinderYouCoordinator = hass.data[DOMAIN][entry.entry_id]
-    # First refresh populates the shutter list.
-    await coordinator.async_config_entry_first_refresh()
     async_add_entities(FinderYouCover(coordinator, shutter) for shutter in coordinator.shutters)
 
 
