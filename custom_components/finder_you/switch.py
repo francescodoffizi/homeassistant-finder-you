@@ -91,10 +91,6 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
             _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_on command", self.entity_id)
             return
 
-        if self.is_on:
-            _LOGGER.debug("%s is already ON, skipping toggle", self.entity_id)
-            return
-
         self._is_on = True
         self.coordinator.channel_states.setdefault((self._switch.uuid, self._switch.channel), {})["is_on"] = True
         self.async_write_ha_state()
@@ -106,10 +102,6 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
         """Turn off the switch."""
         if self.is_syncing:
             _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_off command", self.entity_id)
-            return
-
-        if not self.is_on:
-            _LOGGER.debug("%s is already OFF, skipping toggle", self.entity_id)
             return
 
         self._is_on = False

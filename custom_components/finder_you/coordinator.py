@@ -811,22 +811,31 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self.async_set_updated_data(self.data)
 
     async def _async_verify_switch_state(self, device_uuid: str, channel: int, target_is_on: bool) -> None:
-        """Polls cloud state after local BLE toggle. If out-of-sync, triggers cloud fallback."""
+        """Polls cloud state after local BLE toggle. If out-of-sync after grace window, triggers cloud fallback."""
         key = (device_uuid, channel)
         try:
-            await asyncio.sleep(2.0)
-            plant_payload = await self._run_or_reconnect(
-                lambda c: c.get_plant(self._plant_id) if self._plant_id else c.handshake()
-            )
-            if isinstance(plant_payload, bytes):
-                new_states = extract_channel_states(plant_payload)
-                real_state = new_states.get(key, {}).get("is_on")
-                if real_state is not None and real_state != target_is_on:
-                    _LOGGER.warning(
-                        "State mismatch detected for %s Ch %d (expected %s, got %s). Triggering active Cloud Fallback...",
-                        device_uuid, channel, target_is_on, real_state
-                    )
-                    await self._send_cloud_switch(device_uuid, channel, target_is_on)
+            # Poll up to 6 seconds (mesh telemetry to gateway takes ~3-4.5s)
+            deadline = asyncio.get_event_loop().time() + 6.0
+            matched = False
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(1.5)
+                plant_payload = await self._run_or_reconnect(
+                    lambda c: c.get_plant(self._plant_id) if self._plant_id else c.handshake()
+                )
+                if isinstance(plant_payload, bytes):
+                    new_states = extract_channel_states(plant_payload)
+                    real_state = new_states.get(key, {}).get("is_on")
+                    if real_state == target_is_on:
+                        matched = True
+                        _LOGGER.debug("BLE switch verified via mesh telemetry for %s Ch %d (%s)", device_uuid, channel, real_state)
+                        break
+
+            if not matched:
+                _LOGGER.warning(
+                    "State mismatch detected for %s Ch %d (expected %s). Triggering active Cloud Fallback...",
+                    device_uuid, channel, target_is_on
+                )
+                await self._send_cloud_switch(device_uuid, channel, target_is_on)
         except Exception as err:
             _LOGGER.debug("Failed background state verification for %s Ch %d: %s", device_uuid, channel, err)
         finally:
