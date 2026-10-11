@@ -98,8 +98,24 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
             return channel_data["brightness"]
         return self._brightness
 
+    @property
+    def is_syncing(self) -> bool:
+        """Return True if a command is currently syncing or verifying."""
+        return self.coordinator.is_channel_syncing(self._light.uuid, self._light.channel)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes."""
+        return {
+            "syncing": self.is_syncing,
+        }
+
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the light, optionally adjusting brightness."""
+        if self.is_syncing:
+            _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_on command", self.entity_id)
+            return
+
         if self._light.is_dimmer and ATTR_BRIGHTNESS in kwargs:
             raw_val = kwargs[ATTR_BRIGHTNESS]
             self._brightness = raw_val
@@ -127,6 +143,10 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
+        if self.is_syncing:
+            _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_off command", self.entity_id)
+            return
+
         # Discrete Check: if already off, do not send toggle click
         if not self.is_on:
             _LOGGER.debug("%s is already OFF, skipping toggle", self.entity_id)

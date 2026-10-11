@@ -147,8 +147,13 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         # Local-First BLE Direct Mesh Routing with state verification
         self._enable_local_ble: bool = True
         self._ble_inventory: dict[str, BleDirectDevice] = {}
+        self._syncing_channels: set[tuple[str, int]] = set()
         self._topology_router = FinderTopologyRouter(hass)
         self._topology_router.start()
+
+    def is_channel_syncing(self, device_uuid: str, channel: int) -> bool:
+        """Return True if a channel command is currently being executed or verified."""
+        return (device_uuid, channel) in self._syncing_channels
 
     @property
     def topology_router(self) -> FinderTopologyRouter:
@@ -665,67 +670,84 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
 
     async def async_switch_on(self, device_uuid: str, channel: int = 1) -> None:
         """Switch on a light or plug channel with Local-First BLE routing and cloud fallback."""
-        if self._enable_local_ble and device_uuid in self._ble_inventory:
-            ble_dev = self._ble_inventory[device_uuid]
-            _LOGGER.info("Attempting Local BLE direct switch_on for %s Ch %d (%s)", device_uuid, channel, ble_dev.mac)
-            if await self._topology_router.async_dispatch_click(ble_dev, channel):
-                self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = True
-                self._last_successful_command_ts = time.time()
-                _LOGGER.info("Local BLE switch_on succeeded for %s Ch %d", device_uuid, channel)
-                self.async_set_updated_data(self.data)
-                self.hass.async_create_task(self._async_verify_switch_state(device_uuid, channel, target_is_on=True))
-                return
-            _LOGGER.warning("Local BLE switch_on failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
-
-        assert self._plant_id is not None
-        if self._should_preemptive_rehandshake():
-            _LOGGER.info("preemptive rehandshake before switch_on")
-            await self._drop_client()
-        async with self._send_lock:
-            loop = asyncio.get_event_loop()
-            wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            await self._run_or_reconnect(
-                lambda c: c.switch_on(self._plant_id, device_uuid.encode(), channel)
-            )
-            self._last_send_ts = asyncio.get_event_loop().time()
-        self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = True
-        self._last_successful_command_ts = time.time()
-        _LOGGER.info("switched on device %s channel %d via Cloud", device_uuid, channel)
+        key = (device_uuid, channel)
+        self._syncing_channels.add(key)
         self.async_set_updated_data(self.data)
+        try:
+            if self._enable_local_ble and device_uuid in self._ble_inventory:
+                ble_dev = self._ble_inventory[device_uuid]
+                _LOGGER.info("Attempting Local BLE direct switch_on for %s Ch %d (%s)", device_uuid, channel, ble_dev.mac)
+                if await self._topology_router.async_dispatch_click(ble_dev, channel):
+                    self._channel_states.setdefault(key, {})["is_on"] = True
+                    self._last_successful_command_ts = time.time()
+                    _LOGGER.info("Local BLE switch_on succeeded for %s Ch %d", device_uuid, channel)
+                    self.async_set_updated_data(self.data)
+                    self.hass.async_create_task(self._async_verify_switch_state(device_uuid, channel, target_is_on=True))
+                    return
+                _LOGGER.warning("Local BLE switch_on failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
+
+            assert self._plant_id is not None
+            if self._should_preemptive_rehandshake():
+                _LOGGER.info("preemptive rehandshake before switch_on")
+                await self._drop_client()
+            async with self._send_lock:
+                loop = asyncio.get_event_loop()
+                wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                await self._run_or_reconnect(
+                    lambda c: c.switch_on(self._plant_id, device_uuid.encode(), channel)
+                )
+                self._last_send_ts = asyncio.get_event_loop().time()
+            self._channel_states.setdefault(key, {})["is_on"] = True
+            self._last_successful_command_ts = time.time()
+            _LOGGER.info("switched on device %s channel %d via Cloud", device_uuid, channel)
+            self.async_set_updated_data(self.data)
+        finally:
+            # If not waiting for background verify task, clear syncing
+            if not (self._enable_local_ble and device_uuid in self._ble_inventory):
+                self._syncing_channels.discard(key)
+                self.async_set_updated_data(self.data)
 
     async def async_switch_off(self, device_uuid: str, channel: int = 1) -> None:
         """Switch off a light or plug channel with Local-First BLE routing and cloud fallback."""
-        if self._enable_local_ble and device_uuid in self._ble_inventory:
-            ble_dev = self._ble_inventory[device_uuid]
-            _LOGGER.info("Attempting Local BLE direct switch_off for %s Ch %d (%s)", device_uuid, channel, ble_dev.mac)
-            if await self._topology_router.async_dispatch_click(ble_dev, channel):
-                self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = False
-                self._last_successful_command_ts = time.time()
-                _LOGGER.info("Local BLE switch_off succeeded for %s Ch %d", device_uuid, channel)
-                self.async_set_updated_data(self.data)
-                self.hass.async_create_task(self._async_verify_switch_state(device_uuid, channel, target_is_on=False))
-                return
-            _LOGGER.warning("Local BLE switch_off failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
-
-        assert self._plant_id is not None
-        if self._should_preemptive_rehandshake():
-            _LOGGER.info("preemptive rehandshake before switch_off")
-            await self._drop_client()
-        async with self._send_lock:
-            loop = asyncio.get_event_loop()
-            wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            await self._run_or_reconnect(
-                lambda c: c.switch_off(self._plant_id, device_uuid.encode(), channel)
-            )
-            self._last_send_ts = asyncio.get_event_loop().time()
-        self._channel_states.setdefault((device_uuid, channel), {})["is_on"] = False
-        self._last_successful_command_ts = time.time()
-        _LOGGER.info("switched off device %s channel %d via Cloud", device_uuid, channel)
+        key = (device_uuid, channel)
+        self._syncing_channels.add(key)
         self.async_set_updated_data(self.data)
+        try:
+            if self._enable_local_ble and device_uuid in self._ble_inventory:
+                ble_dev = self._ble_inventory[device_uuid]
+                _LOGGER.info("Attempting Local BLE direct switch_off for %s Ch %d (%s)", device_uuid, channel, ble_dev.mac)
+                if await self._topology_router.async_dispatch_click(ble_dev, channel):
+                    self._channel_states.setdefault(key, {})["is_on"] = False
+                    self._last_successful_command_ts = time.time()
+                    _LOGGER.info("Local BLE switch_off succeeded for %s Ch %d", device_uuid, channel)
+                    self.async_set_updated_data(self.data)
+                    self.hass.async_create_task(self._async_verify_switch_state(device_uuid, channel, target_is_on=False))
+                    return
+                _LOGGER.warning("Local BLE switch_off failed for %s Ch %d, falling back to Finder Cloud", device_uuid, channel)
+
+            assert self._plant_id is not None
+            if self._should_preemptive_rehandshake():
+                _LOGGER.info("preemptive rehandshake before switch_off")
+                await self._drop_client()
+            async with self._send_lock:
+                loop = asyncio.get_event_loop()
+                wait = COMMAND_SEND_GAP - (loop.time() - self._last_send_ts)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                await self._run_or_reconnect(
+                    lambda c: c.switch_off(self._plant_id, device_uuid.encode(), channel)
+                )
+                self._last_send_ts = asyncio.get_event_loop().time()
+            self._channel_states.setdefault(key, {})["is_on"] = False
+            self._last_successful_command_ts = time.time()
+            _LOGGER.info("switched off device %s channel %d via Cloud", device_uuid, channel)
+            self.async_set_updated_data(self.data)
+        finally:
+            if not (self._enable_local_ble and device_uuid in self._ble_inventory):
+                self._syncing_channels.discard(key)
+                self.async_set_updated_data(self.data)
 
     async def async_set_brightness(self, device_uuid: str, percent: int, channel: int = 1) -> None:
         """Set brightness level (0-100%) on a dimmer channel with Local-First BLE routing and cloud fallback."""
@@ -787,23 +809,26 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
 
     async def _async_verify_switch_state(self, device_uuid: str, channel: int, target_is_on: bool) -> None:
         """Polls cloud state after local BLE toggle. If out-of-sync, triggers cloud fallback."""
-        await asyncio.sleep(2.0)
+        key = (device_uuid, channel)
         try:
+            await asyncio.sleep(2.0)
             plant_payload = await self._run_or_reconnect(
                 lambda c: c.get_plant(self._plant_id) if self._plant_id else c.handshake()
             )
-            if not isinstance(plant_payload, bytes):
-                return
-            new_states = extract_channel_states(plant_payload)
-            real_state = new_states.get((device_uuid, channel), {}).get("is_on")
-            if real_state is not None and real_state != target_is_on:
-                _LOGGER.warning(
-                    "State mismatch detected for %s Ch %d (expected %s, got %s). Triggering active Cloud Fallback...",
-                    device_uuid, channel, target_is_on, real_state
-                )
-                await self._send_cloud_switch(device_uuid, channel, target_is_on)
+            if isinstance(plant_payload, bytes):
+                new_states = extract_channel_states(plant_payload)
+                real_state = new_states.get(key, {}).get("is_on")
+                if real_state is not None and real_state != target_is_on:
+                    _LOGGER.warning(
+                        "State mismatch detected for %s Ch %d (expected %s, got %s). Triggering active Cloud Fallback...",
+                        device_uuid, channel, target_is_on, real_state
+                    )
+                    await self._send_cloud_switch(device_uuid, channel, target_is_on)
         except Exception as err:
             _LOGGER.debug("Failed background state verification for %s Ch %d: %s", device_uuid, channel, err)
+        finally:
+            self._syncing_channels.discard(key)
+            self.async_set_updated_data(self.data)
 
     async def async_shutdown(self) -> None:
         self._topology_router.stop()

@@ -170,45 +170,67 @@ class FinderTopologyRouter:
         channel: int,
         preferred_node: str | None = None,
     ) -> bool:
-        """Transmit a relay / button click via the best ESPHome node."""
-        target_node = preferred_node or self.select_best_node(device)
-        if not target_node:
+        """Transmit a relay / button click via the best ESPHome node or all nodes."""
+        self._discover_registered_nodes()
+        if not self._esphome_nodes:
             _LOGGER.warning("No ESPHome mesh node available to send click to %s", device.mac)
             return False
 
-        service_name = f"{target_node}_finder_mesh_click"
         payload = {
             "mac": device.mac,
             "key": device.key,
             "channel": channel,
         }
-        try:
-            _LOGGER.info(
-                "Local BLE Dispatch: Calling esphome.%s for MAC %s Ch %d",
-                service_name,
-                device.mac,
-                channel,
-            )
-            await self.hass.services.async_call("esphome", service_name, payload, blocking=True)
-            return True
-        except Exception as err:
-            _LOGGER.warning(
-                "Failed to send local BLE click via node '%s': %s", target_node, err
-            )
-            # If multi-node, try one fallback node before returning failure
-            alt_nodes = [n for n in self._esphome_nodes if n != target_node]
-            if alt_nodes:
-                alt_node = alt_nodes[0]
-                alt_service = f"{alt_node}_finder_mesh_click"
-                try:
-                    _LOGGER.info(
-                        "Retrying local BLE click via alternate node '%s'", alt_node
-                    )
-                    await self.hass.services.async_call("esphome", alt_service, payload, blocking=True)
-                    return True
-                except Exception as alt_err:
-                    _LOGGER.warning("Alternate node '%s' also failed: %s", alt_node, alt_err)
-            return False
+
+        # If a preferred node is given or we have direct RSSI data, use that specific node
+        mac_upper = device.mac.upper().replace("-", ":")
+        candidates = self._topology.get(mac_upper, {})
+        has_direct_sighting = any(
+            n in self._esphome_nodes and (time.time() - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT
+            for n, info in candidates.items()
+        )
+
+        target_node = preferred_node
+        if not target_node and has_direct_sighting:
+            target_node = self.select_best_node(device)
+
+        if target_node:
+            service_name = f"{target_node}_finder_mesh_click"
+            try:
+                _LOGGER.info(
+                    "Local BLE Dispatch: Calling esphome.%s for MAC %s Ch %d",
+                    service_name,
+                    device.mac,
+                    channel,
+                )
+                await self.hass.services.async_call("esphome", service_name, payload, blocking=True)
+                return True
+            except Exception as err:
+                _LOGGER.warning(
+                    "Failed to send local BLE click via node '%s': %s", target_node, err
+                )
+
+        # Multi-Proxy Broadcast: transmit to all discovered nodes in parallel
+        # Devices in the mesh deduplicate identical replay sequence numbers
+        _LOGGER.info(
+            "Local BLE Multi-Proxy Broadcast: Transmitting to %d node(s) %s for MAC %s Ch %d",
+            len(self._esphome_nodes),
+            list(self._esphome_nodes),
+            device.mac,
+            channel,
+        )
+
+        async def _call_node(node: str) -> bool:
+            try:
+                s_name = f"{node}_finder_mesh_click"
+                await self.hass.services.async_call("esphome", s_name, payload, blocking=True)
+                return True
+            except Exception as e:
+                _LOGGER.warning("Broadcast to %s failed: %s", node, e)
+                return False
+
+        results = await asyncio.gather(*[_call_node(n) for n in self._esphome_nodes], return_exceptions=True)
+        return any(isinstance(r, bool) and r for r in results)
 
     async def async_dispatch_set_percent(
         self,

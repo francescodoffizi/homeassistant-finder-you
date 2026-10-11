@@ -73,8 +73,24 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
             return channel_data["is_on"]
         return self._is_on
 
+    @property
+    def is_syncing(self) -> bool:
+        """Return True if a command is currently syncing or verifying."""
+        return self.coordinator.is_channel_syncing(self._switch.uuid, self._switch.channel)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes."""
+        return {
+            "syncing": self.is_syncing,
+        }
+
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the switch."""
+        if self.is_syncing:
+            _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_on command", self.entity_id)
+            return
+
         if self.is_on:
             _LOGGER.debug("%s is already ON, skipping toggle", self.entity_id)
             return
@@ -88,6 +104,10 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the switch."""
+        if self.is_syncing:
+            _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_off command", self.entity_id)
+            return
+
         if not self.is_on:
             _LOGGER.debug("%s is already OFF, skipping toggle", self.entity_id)
             return
