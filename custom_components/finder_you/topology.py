@@ -211,17 +211,19 @@ class FinderTopologyRouter:
                     "Failed to send local BLE click via node '%s': %s", target_node, err
                 )
 
-        # Multi-Proxy Broadcast: transmit to all discovered nodes in parallel
-        # Devices in the mesh deduplicate identical replay sequence numbers
+        # Staggered Multi-Proxy Broadcast: transmit across discovered nodes with a 75ms
+        # time-stagger to prevent simultaneous 2.4 GHz channel collision (jamming) across primary BLE channels
         _LOGGER.info(
-            "Local BLE Multi-Proxy Broadcast: Transmitting to %d node(s) %s for MAC %s Ch %d",
+            "Local BLE Staggered Multi-Proxy Broadcast: Transmitting to %d node(s) %s for MAC %s Ch %d",
             len(self._esphome_nodes),
             list(self._esphome_nodes),
             device.mac,
             channel,
         )
 
-        async def _call_node(node: str) -> bool:
+        async def _call_node_staggered(node: str, delay_s: float) -> bool:
+            if delay_s > 0:
+                await asyncio.sleep(delay_s)
             try:
                 s_name = f"{node}_finder_mesh_click"
                 await self.hass.services.async_call("esphome", s_name, payload, blocking=True)
@@ -230,7 +232,11 @@ class FinderTopologyRouter:
                 _LOGGER.warning("Broadcast to %s failed: %s", node, e)
                 return False
 
-        results = await asyncio.gather(*[_call_node(n) for n in self._esphome_nodes], return_exceptions=True)
+        tasks = [
+            _call_node_staggered(n, idx * 0.075)
+            for idx, n in enumerate(self._esphome_nodes)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         return any(isinstance(r, bool) and r for r in results)
 
     async def async_dispatch_set_percent(
