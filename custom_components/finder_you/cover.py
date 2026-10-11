@@ -13,6 +13,7 @@ from homeassistant.components.cover import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -48,8 +49,15 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
         self._shutter = shutter
         self._attr_unique_id = f"{DOMAIN}_{shutter.uuid}"
         self._attr_name = None
+
+        connections = set()
+        ble_dev = coordinator.ble_inventory.get(shutter.uuid)
+        if ble_dev and ble_dev.mac:
+            connections.add((dr.CONNECTION_BLUETOOTH, ble_dev.mac.lower()))
+
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, shutter.uuid)},
+            connections=connections,
             name=shutter.name,
             manufacturer="Finder",
             model="YESLY Roller Shutter",

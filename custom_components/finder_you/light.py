@@ -11,6 +11,7 @@ from homeassistant.components.light import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -43,8 +44,15 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
         self._light = light
         self._attr_unique_id = f"{DOMAIN}_light_{light.uuid}_{light.channel}"
         self._attr_name = None
+
+        connections = set()
+        ble_dev = coordinator.ble_inventory.get(light.uuid)
+        if ble_dev and ble_dev.mac:
+            connections.add((dr.CONNECTION_BLUETOOTH, ble_dev.mac.lower()))
+
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{light.uuid}_{light.channel}")},
+            connections=connections,
             name=light.name,
             manufacturer="Finder",
             model=light.device_model,

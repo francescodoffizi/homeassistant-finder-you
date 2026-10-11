@@ -10,6 +10,7 @@ from homeassistant.components.switch import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -43,8 +44,15 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
         self._switch = switch
         self._attr_unique_id = f"{DOMAIN}_switch_{switch.uuid}_{switch.channel}"
         self._attr_name = None
+
+        connections = set()
+        ble_dev = coordinator.ble_inventory.get(switch.uuid)
+        if ble_dev and ble_dev.mac:
+            connections.add((dr.CONNECTION_BLUETOOTH, ble_dev.mac.lower()))
+
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{switch.uuid}_{switch.channel}")},
+            connections=connections,
             name=switch.name,
             manufacturer="Finder",
             model=switch.device_model,
