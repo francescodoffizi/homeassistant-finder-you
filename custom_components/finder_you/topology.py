@@ -211,10 +211,10 @@ class FinderTopologyRouter:
                     "Failed to send local BLE click via node '%s': %s", target_node, err
                 )
 
-        # Staggered Multi-Proxy Broadcast: transmit across discovered nodes with a 75ms
-        # time-stagger to prevent simultaneous 2.4 GHz channel collision (jamming) across primary BLE channels
+        # Staggered Multi-Proxy Broadcast: transmit across discovered nodes with a 300ms
+        # time-stagger to completely serialize bursts and avoid RF collision in the air (burst duration is ~250ms)
         _LOGGER.info(
-            "Local BLE Staggered Multi-Proxy Broadcast: Transmitting to %d node(s) %s for MAC %s Ch %d",
+            "Local BLE Staggered Multi-Proxy Broadcast: Transmitting to %d node(s) %s for MAC %s Ch %d (300ms stagger)",
             len(self._esphome_nodes),
             list(self._esphome_nodes),
             device.mac,
@@ -233,7 +233,7 @@ class FinderTopologyRouter:
                 return False
 
         tasks = [
-            _call_node_staggered(n, idx * 0.075)
+            _call_node_staggered(n, idx * 0.300)
             for idx, n in enumerate(self._esphome_nodes)
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
