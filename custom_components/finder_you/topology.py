@@ -27,8 +27,9 @@ TOPOLOGY_STALE_TIMEOUT = 300.0
 class FinderTopologyRouter:
     """Tracks ESPHome node visibility and selects the best transmitter for each device."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, coordinator: Any = None) -> None:
         self.hass = hass
+        self._coordinator = coordinator
         # device_mac -> {node_name: {"rssi": int, "last_seen": float, "mesh_hop": bool}}
         self._topology: dict[str, dict[str, dict[str, Any]]] = {}
         # Set of active ESPHome node names discovered on the network
@@ -70,7 +71,7 @@ class FinderTopologyRouter:
         rssi_str = data.get("rssi")
         mf_str = data.get("mf", "")
 
-        if not node or not mac or not rssi_str:
+        if not mac or not rssi_str:
             return
 
         try:
@@ -78,32 +79,80 @@ class FinderTopologyRouter:
         except (ValueError, TypeError):
             return
 
-        self._esphome_nodes.add(node)
+        if node:
+            self._esphome_nodes.add(node)
         mac_clean = mac.upper().replace("-", ":")
         
-        # Check if this frame is a mesh repeating frame (starts with 0x4x in MF)
-        is_mesh_relay = False
+        # Parse manufacturer hex bytes
+        byte_list: list[int] = []
         parts = mf_str.strip().split()
         if parts:
-            try:
-                first_b = int(parts[0], 16)
-                if (first_b & 0x40) != 0:
-                    is_mesh_relay = True
-            except ValueError:
-                pass
+            for p in parts:
+                try:
+                    byte_list.append(int(p, 16))
+                except ValueError:
+                    pass
 
-        node_entry = self._topology.setdefault(mac_clean, {}).setdefault(node, {})
-        node_entry["rssi"] = rssi
-        node_entry["last_seen"] = time.time()
-        node_entry["is_mesh_relay"] = is_mesh_relay
+        # Check if this frame is a mesh repeating frame (starts with 0x4x in MF)
+        is_mesh_relay = False
+        if byte_list:
+            if (byte_list[0] & 0x40) != 0:
+                is_mesh_relay = True
+
+        if node:
+            node_entry = self._topology.setdefault(mac_clean, {}).setdefault(node, {})
+            node_entry["rssi"] = rssi
+            node_entry["last_seen"] = time.time()
+            node_entry["is_mesh_relay"] = is_mesh_relay
 
         _LOGGER.debug(
             "BLE Topology updated: MAC %s seen by node '%s' (RSSI: %d dBm, mesh=%s)",
             mac_clean,
-            node,
+            node or "unknown",
             rssi,
             is_mesh_relay,
         )
+
+        # Telemetry decoding: match MAC with device inventory in coordinator
+        if self._coordinator and hasattr(self._coordinator, "ble_inventory"):
+            inv = self._coordinator.ble_inventory
+            # Lookup device by MAC
+            matched_dev = None
+            for dev in inv.values():
+                if dev.mac.upper().replace("-", ":") == mac_clean:
+                    matched_dev = dev
+                    break
+
+            if matched_dev:
+                # Decodifica stato Finder YESLY (BleDeviceSupport.GetDeviceChannelStatus & GetDeviceChannelValue)
+                channel_states: dict[int, bool] = {}
+                percent_val: int | None = None
+                fam = (matched_dev.family or "").upper()
+
+                # In Finder YESLY telemetry advertisements:
+                # Data payload typically has flags and relay state at byte 6
+                # (1321, 1322, 1372, 13S2):
+                # Channel 1 status: (data[6] & 0x01) == 0x01
+                # Channel 2 status: (data[6] & 0x10) == 0x10
+                if len(byte_list) >= 7:
+                    b6 = byte_list[6]
+                    channel_states[1] = bool(b6 & 0x01)
+                    channel_states[2] = bool(b6 & 0x10)
+
+                # Dimmer / Shutter percentage value:
+                if any(k in fam for k in ["1521", "1571", "13S2", "SHUTTER"]):
+                    if len(byte_list) >= 5:
+                        # byte 4 is percent value (0-100)
+                        raw_pos = byte_list[4]
+                        if 0 <= raw_pos <= 100:
+                            percent_val = raw_pos
+
+                if channel_states or percent_val is not None:
+                    self._coordinator.handle_ble_device_state_update(
+                        matched_dev.uuid,
+                        channel_states=channel_states if channel_states else None,
+                        percent=percent_val,
+                    )
 
     def select_best_node(self, device: BleDirectDevice) -> str | None:
         """Select the best ESPHome node to transmit to the target device.

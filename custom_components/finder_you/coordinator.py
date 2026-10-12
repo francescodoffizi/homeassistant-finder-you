@@ -10,7 +10,7 @@ import logging
 import time
 from datetime import timedelta
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import (
@@ -148,7 +148,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._enable_local_ble: bool = True
         self._ble_inventory: dict[str, BleDirectDevice] = {}
         self._syncing_channels: set[tuple[str, int]] = set()
-        self._topology_router = FinderTopologyRouter(hass)
+        self._topology_router = FinderTopologyRouter(hass, coordinator=self)
         self._topology_router.start()
 
     def is_channel_syncing(self, device_uuid: str, channel: int) -> bool:
@@ -842,9 +842,50 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             self._syncing_channels.discard(key)
             self.async_set_updated_data(self.data)
 
+    @callback
+    def handle_ble_device_state_update(
+        self,
+        device_uuid: str,
+        channel_states: dict[int, bool] | None = None,
+        percent: int | None = None,
+    ) -> None:
+        """Immediately update entity states upon sniffing physical switch / shutter BLE packet."""
+        updated = False
+        if channel_states:
+            for ch, is_on in channel_states.items():
+                key = (device_uuid, ch)
+                curr = self._channel_states.get(key, {}).get("is_on")
+                if curr != is_on:
+                    self._channel_states.setdefault(key, {})["is_on"] = is_on
+                    updated = True
+                    _LOGGER.info(
+                        "Live BLE telemetry update: Device %s Channel %d -> %s",
+                        device_uuid,
+                        ch,
+                        "ON" if is_on else "OFF",
+                    )
+
+        if percent is not None:
+            # If shutter uuid matches, update position
+            if self.data is not None:
+                old_pos = self.data.get(device_uuid)
+                if old_pos != percent:
+                    self.data[device_uuid] = percent
+                    updated = True
+                    _LOGGER.info(
+                        "Live BLE telemetry update: Shutter %s Position -> %d%%",
+                        device_uuid,
+                        percent,
+                    )
+
+        if updated:
+            self._last_telemetry_change_ts = time.time()
+            self.async_set_updated_data(self.data)
+
     async def async_shutdown(self) -> None:
         self._topology_router.stop()
         if self._client:
             await self._client.close()
             self._client = None
+
 
