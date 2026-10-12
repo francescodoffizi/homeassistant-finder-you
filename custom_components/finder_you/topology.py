@@ -116,34 +116,52 @@ class FinderTopologyRouter:
         # Telemetry decoding: match MAC with device inventory in coordinator
         if self._coordinator and hasattr(self._coordinator, "ble_inventory"):
             inv = self._coordinator.ble_inventory
-            # Lookup device by MAC
             matched_dev = None
+
+            # 1. Match direct frame by exact MAC
             for dev in inv.values():
                 if dev.mac.upper().replace("-", ":") == mac_clean:
                     matched_dev = dev
                     break
 
+            # 2. Match repeating mesh frame (0x4x): originating device MAC suffix is in byte_list[1:4]
+            if not matched_dev and is_mesh_relay and len(byte_list) >= 4:
+                suffix = f"{byte_list[1]:02X}:{byte_list[2]:02X}:{byte_list[3]:02X}"
+                for dev in inv.values():
+                    clean_dmac = dev.mac.upper().replace("-", ":")
+                    if clean_dmac.endswith(suffix):
+                        matched_dev = dev
+                        break
+
             if matched_dev:
-                # Decodifica stato Finder YESLY (BleDeviceSupport.GetDeviceChannelStatus & GetDeviceChannelValue)
                 channel_states: dict[int, bool] = {}
                 percent_val: int | None = None
                 fam = (matched_dev.family or "").upper()
 
-                # In Finder YESLY telemetry advertisements:
-                # Data payload typically has flags and relay state at byte 6
-                # (1321, 1322, 1372, 13S2):
-                # Channel 1 status: (data[6] & 0x01) == 0x01
-                # Channel 2 status: (data[6] & 0x10) == 0x10
-                if len(byte_list) >= 7:
-                    b6 = byte_list[6]
-                    channel_states[1] = bool(b6 & 0x01)
-                    channel_states[2] = bool(b6 & 0x10)
+                # Decodifica stato Finder YESLY:
+                # In pacchetti diretti (non-relay), lo stato relè è tipicamente a byte 6.
+                # In pacchetti repeating mesh (0x4x), il payload ha 4 byte di header mesh (cmd + 3 byte mac suffix),
+                # con stato canali a byte 6 o byte 4 a seconda del tipo di frame.
+                status_byte: int | None = None
+                if is_mesh_relay:
+                    if len(byte_list) >= 7:
+                        status_byte = byte_list[6]
+                    elif len(byte_list) >= 5:
+                        status_byte = byte_list[4]
+                else:
+                    if len(byte_list) >= 7:
+                        status_byte = byte_list[6]
+
+                if status_byte is not None:
+                    # Canale 1: bit 0; Canale 2: bit 4
+                    channel_states[1] = bool(status_byte & 0x01)
+                    channel_states[2] = bool(status_byte & 0x10)
 
                 # Dimmer / Shutter percentage value:
                 if any(k in fam for k in ["1521", "1571", "13S2", "SHUTTER"]):
-                    if len(byte_list) >= 5:
-                        # byte 4 is percent value (0-100)
-                        raw_pos = byte_list[4]
+                    pos_idx = 5 if is_mesh_relay and len(byte_list) >= 6 else 4
+                    if len(byte_list) > pos_idx:
+                        raw_pos = byte_list[pos_idx]
                         if 0 <= raw_pos <= 100:
                             percent_val = raw_pos
 
