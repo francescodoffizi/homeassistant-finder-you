@@ -866,8 +866,29 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                     )
 
         if percent is not None:
-            # If shutter uuid matches, update position
-            if self.data is not None:
+            # Check if device is a dimmer in lights inventory
+            is_dimmer_light = any(
+                l.uuid == device_uuid and l.is_dimmer for l in self._lights
+            )
+
+            if is_dimmer_light:
+                key = (device_uuid, 1)
+                is_on = (percent > 0)
+                br = round((percent / 100) * 255)
+                st = self._channel_states.setdefault(key, {})
+                if st.get("is_on") != is_on or st.get("brightness") != br:
+                    st["is_on"] = is_on
+                    st["brightness"] = br
+                    updated = True
+                    _LOGGER.info(
+                        "Live BLE telemetry update: Dimmer %s -> %s (%d%%, br=%d)",
+                        device_uuid,
+                        "ON" if is_on else "OFF",
+                        percent,
+                        br,
+                    )
+            elif self.data is not None:
+                # Shutter position update
                 old_pos = self.data.get(device_uuid)
                 if old_pos != percent:
                     self.data[device_uuid] = percent

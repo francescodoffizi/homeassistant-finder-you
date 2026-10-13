@@ -64,11 +64,88 @@ class FinderTopologyRouter:
                     self._esphome_nodes.add(node_name)
                     _LOGGER.info("Discovered compatible ESPHome mesh node: %s", node_name)
 
+    def _resolve_esphome_node(self, node: str | None, device_id: str | None) -> str | None:
+        """Resolve the ESPHome node name from an explicit node name or device_id."""
+        if node and node in self._esphome_nodes:
+            return node
+
+        if not device_id:
+            return None
+
+        # Check in-memory cache first
+        if not hasattr(self, "_dev_id_to_node"):
+            self._dev_id_to_node: dict[str, str | None] = {}
+
+        if device_id in self._dev_id_to_node:
+            cached = self._dev_id_to_node[device_id]
+            if cached and cached in self._esphome_nodes:
+                return cached
+
+        # Look up device in HA device registry
+        try:
+            from homeassistant.helpers import device_registry as dr
+            dev_reg = dr.async_get(self.hass)
+            dev_entry = dev_reg.async_get(device_id)
+            if dev_entry:
+                raw_name = (dev_entry.name or dev_entry.name_by_user or "").lower()
+                area_id = (dev_entry.area_id or "").lower()
+                combined = f"{raw_name}_{area_id}".replace("-", "_").replace(" ", "_")
+
+                # Keyword-to-node alias mapping
+                alias_map = {
+                    "cucina": "esphome_web_ce31c4",
+                    "ce31c4": "esphome_web_ce31c4",
+                    "camera_media": "esphome_web_cef3a0",
+                    "cef3a0": "esphome_web_cef3a0",
+                    "sala": "esp32_bluetooth_proxy_18264c",
+                    "soggiorno": "esp32_bluetooth_proxy_18264c",
+                    "18264c": "esp32_bluetooth_proxy_18264c",
+                    "rack": "bluetooth_proxy_rack_183048",
+                    "antibagno": "bluetooth_proxy_rack_183048",
+                    "183048": "bluetooth_proxy_rack_183048",
+                    "sara": "bluetooth_proxy_sara",
+                    "edge": "bluetooth_proxy_edge",
+                }
+
+                matched_node = None
+                for kw, target_node in alias_map.items():
+                    if kw in combined and target_node in self._esphome_nodes:
+                        matched_node = target_node
+                        break
+
+                if not matched_node:
+                    for registered in self._esphome_nodes:
+                        reg_clean = registered.lower().replace("-", "_")
+                        if reg_clean in combined or any(
+                            tok in combined
+                            for tok in reg_clean.split("_")
+                            if tok not in ("bluetooth", "proxy", "esphome", "web", "esp32")
+                        ):
+                            matched_node = registered
+                            break
+
+                self._dev_id_to_node[device_id] = matched_node
+                if matched_node:
+                    _LOGGER.info(
+                        "Resolved ESPHome device_id '%s' (%s, area=%s) -> node '%s'",
+                        device_id,
+                        dev_entry.name,
+                        dev_entry.area_id,
+                        matched_node,
+                    )
+                return matched_node
+        except Exception as err:
+            _LOGGER.debug("Failed resolving device_id '%s': %s", device_id, err)
+
+        return None
+
     @callback
     def _handle_ble_adv_event(self, event: Event) -> None:
         """Process incoming BLE advertisement observation from an ESPHome node."""
         data = event.data
-        node = data.get("node")
+        raw_node = data.get("node")
+        device_id = data.get("device_id")
+        node = self._resolve_esphome_node(raw_node, device_id)
         mac = data.get("mac")
         rssi_str = data.get("rssi")
         mf_str = data.get("mf", "")
@@ -178,7 +255,9 @@ class FinderTopologyRouter:
 
                 # Dimmer / Shutter percentage value:
                 if any(k in fam for k in ["1521", "1571", "13S2", "SHUTTER"]):
-                    pos_idx = 5 if is_mesh_relay and len(byte_list) >= 6 else 4
+                    # In direct frames (non-relay), byte 5 carries brightness / position level.
+                    # In mesh relay frames (0x4x), pos is at byte 5 or 6 depending on header.
+                    pos_idx = 5 if is_mesh_relay and len(byte_list) >= 6 else 5
                     if len(byte_list) > pos_idx:
                         raw_pos = byte_list[pos_idx]
                         if 0 <= raw_pos <= 100:
@@ -197,8 +276,9 @@ class FinderTopologyRouter:
         Ranking strategy:
         1. Nodes that have seen this specific MAC directly within the last 5 minutes,
            sorted by highest RSSI (e.g. -60 dBm > -85 dBm).
-        2. If no direct sightings, any node that has seen mesh relay frames recently.
-        3. Fallback: Any available registered ESPHome node.
+        2. Room/Name affinity matching (e.g. 'sara' -> 'bluetooth_proxy_sara').
+        3. Node that sees the most active mesh traffic.
+        4. Fallback: Any available registered ESPHome node.
         """
         self._discover_registered_nodes()
         if not self._esphome_nodes:
@@ -226,7 +306,44 @@ class FinderTopologyRouter:
             )
             return best_node
 
-        # 2. Sighting via mesh repeaters (node that sees the most active mesh traffic)
+        # 2. Room / name affinity matching
+        dev_search_str = ""
+        if self._coordinator:
+            for l in getattr(self._coordinator, "lights", []):
+                if l.uuid == device.uuid:
+                    dev_search_str += f" {l.name} {l.room or ''}"
+            for s in getattr(self._coordinator, "shutters", []):
+                if s.uuid == device.uuid:
+                    dev_search_str += f" {s.name} {s.room or ''}"
+            for sw in getattr(self._coordinator, "switches", []):
+                if sw.uuid == device.uuid:
+                    dev_search_str += f" {sw.name} {sw.room or ''}"
+        dev_search_clean = dev_search_str.lower().replace("-", "_").replace(" ", "_")
+
+        affinity_map = {
+            "sara": "bluetooth_proxy_sara",
+            "cameretta": "bluetooth_proxy_sara",
+            "cucina": "esphome_web_ce31c4",
+            "media": "esphome_web_cef3a0",
+            "sala": "esp32_bluetooth_proxy_18264c",
+            "soggiorno": "esp32_bluetooth_proxy_18264c",
+            "bagno": "bluetooth_proxy_rack_183048",
+            "rack": "bluetooth_proxy_rack_183048",
+            "matrimoniale": "bluetooth_proxy_edge",
+            "letto": "bluetooth_proxy_edge",
+        }
+        for kw, aff_node in affinity_map.items():
+            if kw in dev_search_clean and aff_node in self._esphome_nodes:
+                _LOGGER.info(
+                    "Selected node '%s' for device %s (%s) based on room/name affinity '%s'",
+                    aff_node,
+                    device.uuid,
+                    device.mac,
+                    kw,
+                )
+                return aff_node
+
+        # 3. Sighting via mesh repeaters (node that sees the most active mesh traffic)
         mesh_scores: dict[str, int] = {}
         for dev_mac, nodes in self._topology.items():
             for node, info in nodes.items():
@@ -242,7 +359,7 @@ class FinderTopologyRouter:
             )
             return best_mesh_node
 
-        # 3. Fallback to any discovered node
+        # 4. Fallback to any discovered node
         fallback_node = next(iter(self._esphome_nodes))
         _LOGGER.debug(
             "Fallback to default node '%s' for MAC %s (no RSSI topology data yet)",
