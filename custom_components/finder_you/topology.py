@@ -34,6 +34,8 @@ class FinderTopologyRouter:
         self._topology: dict[str, dict[str, dict[str, Any]]] = {}
         # Set of active ESPHome node names discovered on the network
         self._esphome_nodes: set[str] = set()
+        # device_uuid -> timestamp until which conflicting telemetry updates are ignored
+        self._tx_guard_until: dict[str, float] = {}
         self._unsub_listener = None
 
     def start(self) -> None:
@@ -134,14 +136,32 @@ class FinderTopologyRouter:
                         break
 
             if matched_dev:
+                # Do not interpret command broadcast frames as state telemetry!
+                # ESPHome / Gateway command packets are exactly 9 bytes: [4B Counter] [1B Cmd] [4B AES-CCM MIC].
+                # Decompiled BleDeviceSupport.GetDeviceChannelStatus requires data.Length >= 11 for telemetry!
+                if len(byte_list) < 11:
+                    _LOGGER.debug(
+                        "Ignoring short/command BLE packet (%d bytes) for %s from node '%s'",
+                        len(byte_list),
+                        matched_dev.mac,
+                        node or "unknown",
+                    )
+                    return
+
+                # Guard window: ignore conflicting telemetry for 2.0s after sending a local BLE command
+                if time.time() < self._tx_guard_until.get(matched_dev.uuid, 0):
+                    _LOGGER.debug(
+                        "Suppressing telemetry during TX guard window for %s", matched_dev.uuid
+                    )
+                    return
+
                 channel_states: dict[int, bool] = {}
                 percent_val: int | None = None
                 fam = (matched_dev.family or "").upper()
 
-                # Decodifica stato Finder YESLY:
-                # In pacchetti diretti (non-relay), lo stato relè è tipicamente a byte 6.
-                # In pacchetti repeating mesh (0x4x), il payload ha 4 byte di header mesh (cmd + 3 byte mac suffix),
-                # con stato canali a byte 6 o byte 4 a seconda del tipo di frame.
+                # Decodifica stato Finder YESLY (BleDeviceSupport.GetDeviceChannelStatus):
+                # In pacchetti di telemetria (>= 11 byte), lo stato relè è a byte 6:
+                # Canale 1: bit 0; Canale 2: bit 4
                 status_byte: int | None = None
                 if is_mesh_relay:
                     if len(byte_list) >= 7:
@@ -153,7 +173,6 @@ class FinderTopologyRouter:
                         status_byte = byte_list[6]
 
                 if status_byte is not None:
-                    # Canale 1: bit 0; Canale 2: bit 4
                     channel_states[1] = bool(status_byte & 0x01)
                     channel_states[2] = bool(status_byte & 0x10)
 
@@ -270,6 +289,7 @@ class FinderTopologyRouter:
                     channel,
                 )
                 await self.hass.services.async_call("esphome", service_name, payload, blocking=True)
+                self._tx_guard_until[device.uuid] = time.time() + 2.0
                 return True
             except Exception as err:
                 _LOGGER.warning(
@@ -285,6 +305,7 @@ class FinderTopologyRouter:
                     "Retrying local BLE click via alternate node '%s'", alt_node
                 )
                 await self.hass.services.async_call("esphome", alt_service, payload, blocking=True)
+                self._tx_guard_until[device.uuid] = time.time() + 2.0
                 return True
             except Exception as alt_err:
                 _LOGGER.warning("Alternate node '%s' also failed: %s", alt_node, alt_err)
@@ -316,6 +337,7 @@ class FinderTopologyRouter:
                 percent,
             )
             await self.hass.services.async_call("esphome", service_name, payload, blocking=True)
+            self._tx_guard_until[device.uuid] = time.time() + 2.0
             return True
         except Exception as err:
             _LOGGER.warning(
@@ -330,6 +352,7 @@ class FinderTopologyRouter:
                         "Retrying local BLE percent via alternate node '%s'", alt_node
                     )
                     await self.hass.services.async_call("esphome", alt_service, payload, blocking=True)
+                    self._tx_guard_until[device.uuid] = time.time() + 2.0
                     return True
                 except Exception as alt_err:
                     _LOGGER.warning("Alternate node '%s' also failed: %s", alt_node, alt_err)
