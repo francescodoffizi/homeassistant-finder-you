@@ -258,9 +258,7 @@ class FinderTopologyRouter:
             for n, info in candidates.items()
         )
 
-        target_node = preferred_node
-        if not target_node and has_direct_sighting:
-            target_node = self.select_best_node(device)
+        target_node = preferred_node or self.select_best_node(device)
 
         if target_node:
             service_name = f"{target_node}_finder_mesh_click"
@@ -278,33 +276,19 @@ class FinderTopologyRouter:
                     "Failed to send local BLE click via node '%s': %s", target_node, err
                 )
 
-        # Staggered Multi-Proxy Broadcast: transmit across discovered nodes with a 300ms
-        # time-stagger to completely serialize bursts and avoid RF collision in the air (burst duration is ~250ms)
-        _LOGGER.info(
-            "Local BLE Staggered Multi-Proxy Broadcast: Transmitting to %d node(s) %s for MAC %s Ch %d (300ms stagger)",
-            len(self._esphome_nodes),
-            list(self._esphome_nodes),
-            device.mac,
-            channel,
-        )
-
-        async def _call_node_staggered(node: str, delay_s: float) -> bool:
-            if delay_s > 0:
-                await asyncio.sleep(delay_s)
+        alt_nodes = [n for n in self._esphome_nodes if n != target_node]
+        if alt_nodes:
+            alt_node = alt_nodes[0]
+            alt_service = f"{alt_node}_finder_mesh_click"
             try:
-                s_name = f"{node}_finder_mesh_click"
-                await self.hass.services.async_call("esphome", s_name, payload, blocking=True)
+                _LOGGER.info(
+                    "Retrying local BLE click via alternate node '%s'", alt_node
+                )
+                await self.hass.services.async_call("esphome", alt_service, payload, blocking=True)
                 return True
-            except Exception as e:
-                _LOGGER.warning("Broadcast to %s failed: %s", node, e)
-                return False
-
-        tasks = [
-            _call_node_staggered(n, idx * 0.300)
-            for idx, n in enumerate(self._esphome_nodes)
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        return any(isinstance(r, bool) and r for r in results)
+            except Exception as alt_err:
+                _LOGGER.warning("Alternate node '%s' also failed: %s", alt_node, alt_err)
+        return False
 
     async def async_dispatch_set_percent(
         self,

@@ -13,6 +13,9 @@ Tutte le modifiche degne di nota a questa integrazione personalizzata per Home A
   - Aggiunto l'attributo `syncing: true/false` su entità `light` e `switch` per fornire feedback immediato all'utente durante l'elaborazione dei comandi e prevenire rimbalzi o doppi toggle a cascata.
 
 ### Modificato
+- **Risoluzione Fibrillazione Rele (Rimozione Multi-Proxy Broadcast su Toggle)**:
+  - In topology.py, rimosso il broadcast multi-proxy sequenziale per async_dispatch_click che causava toggle ripetuti (sfarfallio rapido on/off a 300ms) sui rele fisici (13.22/13.72).
+  - La selezione del nodo (target_node) ora utilizza sempre select_best_node(device) per instradare il click verso il singolo proxy ottimale, con retry su singolo nodo alternativo in caso di eccezione del servizio.
 - Rimosso l'early-return con controllo statico su `switch.py` che impediva re-invii espliciti del comando se l'entità era già considerata nel medesimo stato.
 - Corretto l'import asincrono mancante (`import asyncio`) in `topology.py`.
 
