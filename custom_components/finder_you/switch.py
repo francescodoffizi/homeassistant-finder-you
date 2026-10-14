@@ -73,6 +73,7 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
             return channel_data["is_on"]
         return self._is_on
 
+
     @property
     def is_syncing(self) -> bool:
         """Return True if a command is currently syncing or verifying."""
@@ -87,12 +88,7 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the switch."""
-        if self.is_syncing:
-            _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_on command", self.entity_id)
-            return
-
         self._is_on = True
-        self.coordinator.channel_states.setdefault((self._switch.uuid, self._switch.channel), {})["is_on"] = True
         self.async_write_ha_state()
         await self.coordinator.async_switch_on(
             self._switch.uuid, self._switch.channel
@@ -100,12 +96,7 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the switch."""
-        if self.is_syncing:
-            _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_off command", self.entity_id)
-            return
-
         self._is_on = False
-        self.coordinator.channel_states.setdefault((self._switch.uuid, self._switch.channel), {})["is_on"] = False
         self.async_write_ha_state()
         await self.coordinator.async_switch_off(
             self._switch.uuid, self._switch.channel

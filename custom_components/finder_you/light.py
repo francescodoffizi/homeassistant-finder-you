@@ -98,6 +98,7 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
             return channel_data["brightness"]
         return self._brightness
 
+
     @property
     def is_syncing(self) -> bool:
         """Return True if a command is currently syncing or verifying."""
@@ -112,10 +113,6 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the light, optionally adjusting brightness."""
-        if self.is_syncing:
-            _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_on command", self.entity_id)
-            return
-
         if self._light.is_dimmer and ATTR_BRIGHTNESS in kwargs:
             raw_val = kwargs[ATTR_BRIGHTNESS]
             self._brightness = raw_val
@@ -130,7 +127,6 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
             return
 
         self._is_on = True
-        self.coordinator.channel_states.setdefault((self._light.uuid, self._light.channel), {})["is_on"] = True
         self.async_write_ha_state()
         await self.coordinator.async_switch_on(
             self._light.uuid, self._light.channel
@@ -138,12 +134,7 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the light."""
-        if self.is_syncing:
-            _LOGGER.warning("%s is currently syncing/communicating, ignoring turn_off command", self.entity_id)
-            return
-
         self._is_on = False
-        self.coordinator.channel_states.setdefault((self._light.uuid, self._light.channel), {})["is_on"] = False
         self.async_write_ha_state()
         await self.coordinator.async_switch_off(
             self._light.uuid, self._light.channel
