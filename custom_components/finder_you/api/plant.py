@@ -367,10 +367,24 @@ def extract_channel_states(payload: bytes) -> dict[tuple[str, int], dict[str, An
         elif fam in ("1322", "1372"):  # 2-channel Relays / Switches
             f11_val = fields.get(11, [None])[0]
             f12_val = fields.get(12, [None])[0]
-            ch1_on = (f11_val == 3)
-            ch2_on = (f12_val == 3)
-            out[(dev_uuid, 1)] = {"is_on": ch1_on, "brightness": None}
-            out[(dev_uuid, 2)] = {"is_on": ch2_on, "brightness": None}
+            ch1_on = None
+            ch2_on = None
+            if f11_val is not None:
+                ch1_on = (f11_val == 3)
+            if f12_val is not None:
+                ch2_on = (f12_val == 3)
+
+            # Fallback to f5 status byte if f11/f12 are absent
+            if (ch1_on is None or ch2_on is None) and isinstance(f5, bytes) and len(f5) >= 7:
+                # In telemetry payload, byte 6 contains relay bits: Ch1 = bit 0, Ch2 = bit 4
+                sb = f5[6]
+                if ch1_on is None:
+                    ch1_on = bool(sb & 0x01)
+                if ch2_on is None:
+                    ch2_on = bool(sb & 0x10)
+
+            out[(dev_uuid, 1)] = {"is_on": ch1_on if ch1_on is not None else False, "brightness": None}
+            out[(dev_uuid, 2)] = {"is_on": ch2_on if ch2_on is not None else False, "brightness": None}
     return out
 
 

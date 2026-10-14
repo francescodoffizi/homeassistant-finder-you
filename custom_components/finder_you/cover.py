@@ -80,6 +80,7 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
             return observed
         return self._last_commanded_position
 
+
     @property
     def is_closed(self) -> bool | None:
         pos = self.current_cover_position
