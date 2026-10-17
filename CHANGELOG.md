@@ -5,6 +5,13 @@ Tutte le modifiche degne di nota a questa integrazione personalizzata per Home A
 ## [Unreleased]
 
 ### Aggiunto
+- **Meccanismo di Auto-Reconnect & Self-Healing Sessione Cloud (Anti-Stall)**:
+  - In `coordinator.py`, introdotto il conteggio dei fallimenti consecutivi di polling (`_consecutive_update_failures`).
+  - Se il polling fallisce ripetutamente (2-3 volte consecutive per drop HTTP/2 o GOAWAY silenzioso), l'OAuth token cached viene invalidato forzando un ri-login completo e ripristino istantaneo dello stream gRPC.
+  - Implementato fallback su cache locale per i primi 5 cicli (~75s) in caso di micro-disconnessioni transitorie per prevenire eccezioni `UpdateFailed`.
+- **Resilienza Disponibilità Entità (Zero Punti Esclamativi su Cloud Drop)**:
+  - In `cover.py`, `light.py` e `switch.py`, implementato l'override esplicito del metodo `@property def available(self) -> bool`.
+  - Le entità rimangono marcate come disponibili (`available=True`) se il routing mesh BLE locale o lo stato ripristinato/memorizzato in cache sono validi, impedendo che i dispositivi diventino `unavailable` con punto esclamativo in Home Assistant / HomeKit durante brevi fluttuazioni del cloud Finder.
 - **Fallback Cloud Deterministico a 3.0s con Conferma Telemetrica Reale**:
   - In `coordinator.py`, implementato `_state_change_events` con `BLE_STATE_CONFIRMATION_TIMEOUT = 3.0s`: `async_switch_on` e `async_switch_off` inviano il comando BLE locale (max 2 nodi esphome con gap 300ms) e attendono fino a 3.0s per l'arrivo della telemetria fisica reale dalla rete mesh.
   - Se entro 3.0s il relè fisico non conferma la commutazione, l'integrazione attiva il comando discreto su Finder Cloud (`c.switch_on` / `c.switch_off`), evitando doppi toggle ravvicinati o spegnimenti accidentali.
