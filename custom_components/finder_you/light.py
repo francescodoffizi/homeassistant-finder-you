@@ -82,6 +82,17 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
                     self._brightness = b
 
     @property
+    def available(self) -> bool:
+        """Return True if entity is available.
+
+        Stays available if local BLE routing is active or if coordinator is healthy,
+        preventing lights from becoming unavailable during brief cloud gRPC drops.
+        """
+        if self.coordinator.enable_local_ble or (self._light.uuid, self._light.channel) in self.coordinator.channel_states:
+            return True
+        return super().available
+
+    @property
     def is_on(self) -> bool:
         channel_data = self.coordinator.channel_states.get((self._light.uuid, self._light.channel))
         if channel_data is not None and "is_on" in channel_data:

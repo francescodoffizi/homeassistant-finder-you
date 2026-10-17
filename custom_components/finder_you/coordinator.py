@@ -158,12 +158,17 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._state_change_events: dict[tuple[str, int], asyncio.Event] = {}
         self._pending_ble_target: dict[tuple[str, int], bool] = {}
         self._ble_confirm_guard_until: dict[tuple[str, int], float] = {}
+        self._consecutive_update_failures: int = 0
         self._topology_router = FinderTopologyRouter(hass, coordinator=self)
         self._topology_router.start()
 
     def is_channel_syncing(self, device_uuid: str, channel: int) -> bool:
         """Return True if a channel command is currently being executed or verified."""
         return (device_uuid, channel) in self._syncing_channels
+
+    @property
+    def enable_local_ble(self) -> bool:
+        return self._enable_local_ble
 
     @property
     def topology_router(self) -> FinderTopologyRouter:
@@ -272,11 +277,8 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         """Run ``fn(client)`` once. If the connection looks dead (any error or
         timeout), drop the client and retry once with a fresh one.
 
-        Without this, a silent GOAWAY or a coordinator update timeout leaves
-        ``_client`` half-broken: HA service calls would write into a closed
-        socket and hang forever, with no log line, because the underlying
-        cloud protocol has no exception path that surfaces above the
-        per-call read.
+        If repeated failures occur, also purge the cached OAuth token to force
+        a full fresh authentication sequence.
         """
         try:
             client = await self._ensure_client()
@@ -284,6 +286,9 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         except Exception as err:
             _LOGGER.info("client call failed (%s); reconnecting", err)
             await self._drop_client()
+            if self._consecutive_update_failures >= 2:
+                _LOGGER.info("Multiple failures detected; purging token to force fresh login")
+                self._token = None
             client = await self._ensure_client()
             return await asyncio.wait_for(fn(client), timeout=15)
 
@@ -293,8 +298,22 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             plant_payload = await self._run_or_reconnect(
                 lambda c: c.get_plant(self._plant_id) if self._plant_id else c.handshake()
             )
+            self._consecutive_update_failures = 0
         except (TimeoutError, FinderApiError, ConnectionError, OAuthError, OSError) as err:
+            self._consecutive_update_failures += 1
             await self._drop_client()
+            if self._consecutive_update_failures >= 3:
+                self._token = None
+            
+            # If we have existing data or local BLE enabled, fall back to cached state
+            # for up to 5 consecutive failures (~75s) to avoid UI entities flickering unavailable.
+            if self.data and self._consecutive_update_failures <= 5:
+                _LOGGER.warning(
+                    "Cloud poll failed (%s) [%d/5]; falling back to cached telemetry",
+                    err,
+                    self._consecutive_update_failures,
+                )
+                return self.data
             raise UpdateFailed(str(err)) from err
 
         # If we fell back to handshake (no plant_id yet), the payload is the

@@ -67,6 +67,17 @@ class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, Res
             self._is_on = (last.state == "on")
 
     @property
+    def available(self) -> bool:
+        """Return True if entity is available.
+
+        Stays available if local BLE routing is active or if coordinator is healthy,
+        preventing switches from becoming unavailable during brief cloud gRPC drops.
+        """
+        if self.coordinator.enable_local_ble or (self._switch.uuid, self._switch.channel) in self.coordinator.channel_states:
+            return True
+        return super().available
+
+    @property
     def is_on(self) -> bool:
         channel_data = self.coordinator.channel_states.get((self._switch.uuid, self._switch.channel))
         if channel_data is not None and "is_on" in channel_data:

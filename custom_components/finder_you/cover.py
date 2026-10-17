@@ -82,6 +82,17 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
 
 
     @property
+    def available(self) -> bool:
+        """Return True if entity is available.
+
+        Stays available if local BLE routing is active or if coordinator is healthy,
+        preventing entities from becoming unavailable during brief cloud gRPC drops.
+        """
+        if self.coordinator.enable_local_ble or self._last_commanded_position is not None:
+            return True
+        return super().available
+
+    @property
     def is_closed(self) -> bool | None:
         pos = self.current_cover_position
         if pos is None:
