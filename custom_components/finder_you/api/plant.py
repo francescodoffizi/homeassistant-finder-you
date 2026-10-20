@@ -8,6 +8,7 @@ name.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
 from .proto import parse_fields
@@ -327,6 +328,34 @@ def extract_shutter_positions(payload: bytes) -> dict[str, int]:
         pos = pos_fields.get(1, [None])[0]
         if isinstance(pos, int) and 0 <= pos <= 100:
             out[uuid_b.decode()] = pos
+    return out
+
+
+def extract_shutter_durations(payload: bytes) -> dict[str, tuple[float, float]]:
+    """Return ``{shutter_uuid: (open_seconds, close_seconds)}`` from the relay's Ch1T1/Ch1T2 JSON config."""
+    out: dict[str, tuple[float, float]] = {}
+    for _sub, fields in _iter_state_submessages(payload):
+        uuid_b = fields.get(1, [None])[0]
+        if not isinstance(uuid_b, bytes) or len(uuid_b) != 36:
+            continue
+        cfg_msg = fields.get(6, [None])[0]
+        if not isinstance(cfg_msg, bytes):
+            continue
+        try:
+            cfg_fields = parse_fields(cfg_msg)
+            cfg_bytes = cfg_fields.get(1, [None])[0]
+            if not isinstance(cfg_bytes, bytes):
+                continue
+            cfg = json.loads(cfg_bytes.decode("utf-8", errors="ignore"))
+        except Exception:
+            continue
+        if cfg.get("Ch1Function") != 177 and fields.get(3, [b""])[0] != b"13S2":
+            continue
+        t1 = cfg.get("Ch1T1")
+        t2 = cfg.get("Ch1T2")
+        open_s = float(t1) if isinstance(t1, (int, float)) and t1 > 0 else 25.0
+        close_s = float(t2) if isinstance(t2, (int, float)) and t2 > 0 else open_s
+        out[uuid_b.decode()] = (open_s, close_s)
     return out
 
 

@@ -37,7 +37,10 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
     _attr_has_entity_name = True
     _attr_device_class = CoverDeviceClass.SHUTTER
     _attr_supported_features = (
-        CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.SET_POSITION
+        CoverEntityFeature.OPEN
+        | CoverEntityFeature.CLOSE
+        | CoverEntityFeature.STOP
+        | CoverEntityFeature.SET_POSITION
     )
     _attr_assumed_state = False
 
@@ -100,6 +103,7 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
         return pos == 0
 
     async def _send(self, op, target_position: int) -> None:
+        self._last_commanded_position = target_position
         try:
             await op()
         except GatewayOfflineError as err:
@@ -126,6 +130,9 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         await self._send(lambda: self.coordinator.async_close_shutter(self._shutter.uuid), 0)
+
+    async def async_stop_cover(self, **kwargs: Any) -> None:
+        await self.coordinator.async_stop_shutter(self._shutter.uuid)
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         pos = kwargs[ATTR_POSITION]

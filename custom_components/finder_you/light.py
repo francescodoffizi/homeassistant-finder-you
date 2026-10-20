@@ -69,8 +69,9 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
         channel_data = self.coordinator.channel_states.get((self._light.uuid, self._light.channel))
         if channel_data is not None and "is_on" in channel_data:
             self._is_on = channel_data["is_on"]
-            if self._light.is_dimmer and channel_data.get("brightness") is not None:
-                self._brightness = channel_data["brightness"]
+            b = channel_data.get("brightness")
+            if self._light.is_dimmer and isinstance(b, int) and b > 0:
+                self._brightness = b
             return
 
         last = await self.async_get_last_state()
@@ -78,7 +79,7 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
             self._is_on = (last.state == "on")
             if self._light.is_dimmer:
                 b = last.attributes.get(ATTR_BRIGHTNESS)
-                if isinstance(b, int) and 0 <= b <= 255:
+                if isinstance(b, int) and 0 < b <= 255:
                     self._brightness = b
 
     @property
@@ -105,8 +106,10 @@ class FinderYouLight(CoordinatorEntity[FinderYouCoordinator], LightEntity, Resto
         if not self._light.is_dimmer:
             return None
         channel_data = self.coordinator.channel_states.get((self._light.uuid, self._light.channel))
-        if channel_data is not None and channel_data.get("brightness") is not None:
-            return channel_data["brightness"]
+        if channel_data is not None:
+            b = channel_data.get("brightness")
+            if isinstance(b, int) and b > 0:
+                self._brightness = b
         return self._brightness
 
 

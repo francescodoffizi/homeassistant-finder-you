@@ -25,6 +25,68 @@ TOPOLOGY_STALE_TIMEOUT = 300.0
 # Guard duration in seconds to ignore delayed or stale mesh telemetry after a local transmission
 BLE_TX_GUARD_DURATION = 6.0
 
+# Physical room adjacency order for fallback proxy selection when RSSI is unavailable
+NODE_ADJACENCY_MAP: dict[str, list[str]] = {
+    "esphome_web_cef3a0": [
+        "bluetooth_proxy_edge",
+        "bluetooth_proxy_sara",
+        "bluetooth_proxy_rack_183048",
+        "esphome_web_ce31c4",
+        "esp32_bluetooth_proxy_18264c",
+    ],
+    "bluetooth_proxy_edge": [
+        "esphome_web_cef3a0",
+        "bluetooth_proxy_sara",
+        "bluetooth_proxy_rack_183048",
+        "esp32_bluetooth_proxy_18264c",
+        "esphome_web_ce31c4",
+    ],
+    "bluetooth_proxy_sara": [
+        "bluetooth_proxy_edge",
+        "esphome_web_cef3a0",
+        "bluetooth_proxy_rack_183048",
+        "esp32_bluetooth_proxy_18264c",
+        "esphome_web_ce31c4",
+    ],
+    "bluetooth_proxy_rack_183048": [
+        "esphome_web_cef3a0",
+        "bluetooth_proxy_sara",
+        "bluetooth_proxy_edge",
+        "esp32_bluetooth_proxy_18264c",
+        "esphome_web_ce31c4",
+    ],
+    "esphome_web_ce31c4": [
+        "esp32_bluetooth_proxy_18264c",
+        "bluetooth_proxy_rack_183048",
+        "esphome_web_cef3a0",
+        "bluetooth_proxy_sara",
+        "bluetooth_proxy_edge",
+    ],
+    "esp32_bluetooth_proxy_18264c": [
+        "esphome_web_ce31c4",
+        "bluetooth_proxy_rack_183048",
+        "esphome_web_cef3a0",
+        "bluetooth_proxy_sara",
+        "bluetooth_proxy_edge",
+    ],
+}
+
+# Mapping of known ESPHome proxy Bluetooth/WiFi MAC prefixes to ESPHome service node names
+SOURCE_MAC_TO_NODE_MAP: dict[str, str] = {
+    "A8:42:E3:CE:31:C6": "esphome_web_ce31c4",
+    "A8:42:E3:CE:31:C4": "esphome_web_ce31c4",
+    "A8:42:E3:CD:76:F2": "bluetooth_proxy_sara",
+    "A8:42:E3:CD:76:F0": "bluetooth_proxy_sara",
+    "A8:42:E3:CD:24:8E": "bluetooth_proxy_edge",
+    "A8:42:E3:CD:24:8C": "bluetooth_proxy_edge",
+    "30:AE:A4:18:30:4A": "bluetooth_proxy_rack_183048",
+    "30:AE:A4:18:30:48": "bluetooth_proxy_rack_183048",
+    "A8:42:E3:CE:F3:A2": "esphome_web_cef3a0",
+    "A8:42:E3:CE:F3:A0": "esphome_web_cef3a0",
+    "30:AE:A4:18:26:4E": "esp32_bluetooth_proxy_18264c",
+    "30:AE:A4:18:26:4C": "esp32_bluetooth_proxy_18264c",
+}
+
 
 class FinderTopologyRouter:
     """Tracks ESPHome node visibility and selects the best transmitter for each device."""
@@ -38,13 +100,18 @@ class FinderTopologyRouter:
         self._esphome_nodes: set[str] = set()
         # device_uuid -> timestamp until which conflicting telemetry updates are ignored
         self._tx_guard_until: dict[str, float] = {}
+        # Deduplication cache for identical raw BLE payloads across dual listeners: mac -> (payload_tuple, ts)
+        self._last_decoded_adv: dict[str, tuple[tuple[int, ...], float]] = {}
         self._unsub_listener = None
+        self._unsub_bt_callback = None
 
     def start(self) -> None:
         """Start listening for BLE advertisement events and register known nodes."""
+        self._install_bleak_finder_guard()
         self._unsub_listener = self.hass.bus.async_listen(
             "esphome.finder_ble_adv", self._handle_ble_adv_event
         )
+        self._register_ha_bluetooth_listener()
         self._discover_registered_nodes()
         _LOGGER.info("Finder BLE Topology Router started")
 
@@ -53,6 +120,127 @@ class FinderTopologyRouter:
         if self._unsub_listener:
             self._unsub_listener()
             self._unsub_listener = None
+        if self._unsub_bt_callback:
+            try:
+                self._unsub_bt_callback()
+            except Exception:
+                pass
+            self._unsub_bt_callback = None
+
+    def _install_bleak_finder_guard(self) -> None:
+        """Prevent HA Bluetooth from opening active GATT connections to connectionless Finder YESLY (05:61:*) devices.
+
+        Finder YESLY actuators (13.S2, 13.72, 15.71) advertise as connectable peripherals without a GAP name,
+        which causes habluetooth / active proxies to invoke BleakClient.connect() right after a shutter starts
+        moving. While a 13.S2 actuator is held in an active GATT session, it stops broadcasting state packets
+        and ignores connectionless BLE mesh commands.
+        """
+        try:
+            import traceback
+            from bleak.exc import BleakError
+            from habluetooth.wrappers import HaBleakClientWrapper
+
+            orig_connect = getattr(HaBleakClientWrapper, "connect", None)
+            if orig_connect is None:
+                return
+            if getattr(orig_connect, "_finder_yesly_guarded", False):
+                orig_connect = getattr(orig_connect, "_finder_yesly_orig", orig_connect)
+
+            logged_caller = False
+
+            async def _guarded_connect(client_self: Any, *args: Any, **kwargs: Any) -> bool:
+                nonlocal logged_caller
+                raw_addr = (
+                    getattr(client_self, "_HaBleakClientWrapper__address", None)
+                    or getattr(client_self, "_address", None)
+                    or getattr(client_self, "address", None)
+                    or ""
+                )
+                addr = str(raw_addr).upper().replace("-", ":")
+                if addr.startswith("05:61:"):
+                    if not logged_caller:
+                        logged_caller = True
+                        stack_str = "".join(traceback.format_stack(limit=10))
+                        _LOGGER.info(
+                            "Blocked active GATT connection attempt to Finder YESLY device %s. Caller stack:\n%s",
+                            addr,
+                            stack_str,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Blocked active GATT connection attempt to connectionless Finder YESLY device %s",
+                            addr,
+                        )
+                    raise BleakError(
+                        f"Active GATT connections are disabled for connectionless Finder YESLY device {addr}"
+                    )
+                return await orig_connect(client_self, *args, **kwargs)
+
+            setattr(_guarded_connect, "_finder_yesly_guarded", True)
+            setattr(_guarded_connect, "_finder_yesly_orig", orig_connect)
+            HaBleakClientWrapper.connect = _guarded_connect  # type: ignore[method-assign]
+            _LOGGER.info("Installed BLE GATT connection guard for Finder YESLY (05:61:*) devices")
+        except Exception as err:
+            _LOGGER.debug("Could not install BLE GATT guard: %s", err)
+
+    def _register_ha_bluetooth_listener(self) -> None:
+        """Register passive listener on HA's native bluetooth integration to capture 05:61:* advertisements from all proxies (including rc-switch)."""
+        try:
+            from homeassistant.components import bluetooth
+            from homeassistant.components.bluetooth.match import BluetoothCallbackMatcher
+
+            self._unsub_bt_callback = bluetooth.async_register_callback(
+                self.hass,
+                self._handle_ha_bluetooth_adv,
+                BluetoothCallbackMatcher(connectable=False),
+                bluetooth.BluetoothScanningMode.PASSIVE,
+            )
+            _LOGGER.info("Registered passive HA Bluetooth callback for Finder YESLY telemetry")
+        except Exception as err:
+            _LOGGER.debug("Could not register passive HA Bluetooth callback: %s", err)
+
+    def _resolve_source_mac_to_node(self, source: str | None) -> str | None:
+        """Map an HA Bluetooth scanner source MAC to a registered ESPHome finder_mesh node."""
+        if not source:
+            return None
+        src_clean = source.upper().replace("-", ":")
+        mapped = SOURCE_MAC_TO_NODE_MAP.get(src_clean)
+        if mapped and mapped in self._esphome_nodes:
+            return mapped
+        return None
+
+    @callback
+    def _handle_ha_bluetooth_adv(self, service_info: Any, change: Any) -> None:
+        """Handle BLE advertisements captured by any HA Bluetooth proxy (including standard proxies like rc-switch)."""
+        mac = getattr(service_info, "address", None)
+        if not mac:
+            return
+        mac_clean = mac.upper().replace("-", ":")
+        if not mac_clean.startswith("05:61:"):
+            return
+
+        mf_data = getattr(service_info, "manufacturer_data", None) or {}
+        if not mf_data:
+            return
+
+        raw_bytes = mf_data.get(0x01D9) or mf_data.get(0x08F2)
+        if raw_bytes is None:
+            raw_bytes = next(iter(mf_data.values()), None)
+        if not raw_bytes:
+            return
+
+        rssi = getattr(service_info, "rssi", None)
+        rssi_int = int(rssi) if isinstance(rssi, (int, float)) else -95
+        source = getattr(service_info, "source", None)
+        node = self._resolve_source_mac_to_node(source)
+
+        self._process_finder_adv_bytes(
+            mac_clean=mac_clean,
+            rssi=rssi_int,
+            byte_list=list(raw_bytes),
+            node=node,
+            source_label=node or source or "ha_bt",
+        )
 
     def _discover_registered_nodes(self) -> None:
         """Scan HA services to find ESPHome nodes that expose finder_mesh services."""
@@ -164,7 +352,7 @@ class FinderTopologyRouter:
         if node:
             self._esphome_nodes.add(node)
         mac_clean = mac.upper().replace("-", ":")
-        
+
         # Parse manufacturer hex bytes
         byte_list: list[int] = []
         parts = mf_str.strip().split()
@@ -175,35 +363,47 @@ class FinderTopologyRouter:
                 except ValueError:
                     pass
 
-        # Check if this frame is a mesh repeating frame (starts with 0x4x in MF)
+        self._process_finder_adv_bytes(
+            mac_clean=mac_clean,
+            rssi=rssi,
+            byte_list=byte_list,
+            node=node,
+            source_label=node or "unknown",
+        )
+
+    def _process_finder_adv_bytes(
+        self,
+        mac_clean: str,
+        rssi: int,
+        byte_list: list[int],
+        node: str | None,
+        source_label: str = "unknown",
+    ) -> None:
+        """Common topology and state telemetry processor for Finder YESLY BLE advertisements."""
         is_mesh_relay = False
-        if byte_list:
-            if (byte_list[0] & 0x40) != 0:
-                is_mesh_relay = True
+        if byte_list and (byte_list[0] & 0x40) != 0:
+            is_mesh_relay = True
 
-        if is_mesh_relay:
-            # Mesh relay frames (0x4x) have the repeater's MAC as transmitter and carry
-            # 13-byte encrypted repeated commands ([4B mesh hdr] + [9B AES-CCM command]).
-            # Decoding byte 6 of a mesh relay frame as unencrypted status causes false
-            # rapid ON/OFF oscillations on the repeating relay and target device.
-            _LOGGER.debug(
-                "Ignoring mesh relay frame (0x4x, %d bytes) from repeater %s via node '%s'",
-                len(byte_list),
-                mac_clean,
-                node or "unknown",
-            )
-            return
-
+        now = time.time()
         if node:
             node_entry = self._topology.setdefault(mac_clean, {}).setdefault(node, {})
             node_entry["rssi"] = rssi
-            node_entry["last_seen"] = time.time()
-            node_entry["is_mesh_relay"] = False
+            node_entry["last_seen"] = now
+            node_entry["is_mesh_relay"] = is_mesh_relay
+
+        if is_mesh_relay:
+            _LOGGER.debug(
+                "Ignoring mesh relay frame (0x4x, %d bytes) from repeater %s via '%s'",
+                len(byte_list),
+                mac_clean,
+                source_label,
+            )
+            return
 
         _LOGGER.debug(
-            "BLE Topology updated: MAC %s seen by node '%s' (RSSI: %d dBm)",
+            "BLE Topology updated: MAC %s seen by '%s' (RSSI: %d dBm)",
             mac_clean,
-            node or "unknown",
+            source_label,
             rssi,
         )
 
@@ -223,35 +423,44 @@ class FinderTopologyRouter:
                 # Decompiled BleDeviceSupport.GetDeviceChannelStatus requires data.Length >= 11 for telemetry!
                 if len(byte_list) < 11:
                     _LOGGER.debug(
-                        "Ignoring short/command BLE packet (%d bytes) for %s from node '%s'",
+                        "Ignoring short/command BLE packet (%d bytes) for %s from '%s'",
                         len(byte_list),
                         matched_dev.mac,
-                        node or "unknown",
+                        source_label,
                     )
                     return
+
+                if node:
+                    self._topology.setdefault(mac_clean, {}).setdefault(node, {})["last_telemetry"] = now
+
+                # Deduplicate identical raw frame within 200ms across dual listeners
+                payload_key = tuple(byte_list[:10])
+                prev_dec = self._last_decoded_adv.get(mac_clean)
+                if prev_dec is not None and prev_dec[0] == payload_key and (now - prev_dec[1]) < 0.2:
+                    return
+                self._last_decoded_adv[mac_clean] = (payload_key, now)
 
                 channel_states: dict[int, bool] = {}
                 percent_val: int | None = None
                 fam = (matched_dev.family or "").upper()
+                is_dimmer = any(k in fam for k in ["1521", "1571"])
+                is_shutter = any(k in fam for k in ["13S2", "SHUTTER"])
 
-                # Decodifica stato Finder YESLY (BleDeviceSupport.GetDeviceChannelStatus):
-                # In pacchetti di telemetria diretta (>= 11 byte), lo stato relè è a byte 6:
-                # Canale 1: bit 0; Canale 2: bit 4
-                status_byte: int | None = byte_list[6] if len(byte_list) >= 7 else None
-
-                if status_byte is not None:
-                    channel_states[1] = bool(status_byte & 0x01)
-                    channel_states[2] = bool(status_byte & 0x10)
-
-                # Dimmer / Shutter percentage value:
-                if any(k in fam for k in ["1521", "1571", "13S2", "SHUTTER"]):
-                    # In direct frames (non-relay), byte 5 carries brightness / position level.
-                    # In mesh relay frames (0x4x), pos is at byte 5 or 6 depending on header.
-                    pos_idx = 5 if is_mesh_relay and len(byte_list) >= 6 else 5
-                    if len(byte_list) > pos_idx:
-                        raw_pos = byte_list[pos_idx]
+                if is_dimmer:
+                    if len(byte_list) > 4:
+                        raw_pos = byte_list[4]
                         if 0 <= raw_pos <= 100:
                             percent_val = raw_pos
+                elif is_shutter:
+                    if len(byte_list) > 5:
+                        raw_pos = byte_list[5]
+                        if 0 <= raw_pos <= 100:
+                            percent_val = raw_pos
+                else:
+                    status_byte: int | None = byte_list[6] if len(byte_list) >= 7 else None
+                    if status_byte is not None:
+                        channel_states[1] = bool(status_byte & 0x01)
+                        channel_states[2] = bool(status_byte & 0x10)
 
                 if channel_states or percent_val is not None:
                     self._coordinator.handle_ble_device_state_update(
@@ -260,53 +469,40 @@ class FinderTopologyRouter:
                         percent=percent_val,
                     )
 
-    def select_best_node(self, device: BleDirectDevice) -> str | None:
-        """Select the best ESPHome node to transmit to the target device.
-
-        Ranking strategy:
-        1. Nodes that have seen this specific MAC directly within the last 5 minutes,
-           sorted by highest RSSI (e.g. -60 dBm > -85 dBm).
-        2. Room/Name affinity matching (e.g. 'sara' -> 'bluetooth_proxy_sara').
-        3. Node that sees the most active mesh traffic.
-        4. Fallback: Any available registered ESPHome node.
-        """
-        self._discover_registered_nodes()
-        if not self._esphome_nodes:
-            return None
-
+    def has_direct_telemetry(self, device: BleDirectDevice, max_age: float = 1800.0) -> bool:
+        """Return True if any active ESPHome node has received direct BLE telemetry from this device."""
         mac_upper = device.mac.upper().replace("-", ":")
         now = time.time()
-
-        # 1. Direct sightings of this device
         candidates = self._topology.get(mac_upper, {})
-        valid_candidates: list[tuple[str, int]] = []
         for node, info in candidates.items():
-            if node in self._esphome_nodes and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT:
-                valid_candidates.append((node, info.get("rssi", -100)))
+            if node in self._esphome_nodes and (now - info.get("last_telemetry", 0)) < max_age:
+                return True
+        if mac_upper in self._last_decoded_adv and (now - self._last_decoded_adv[mac_clean if (mac_clean := mac_upper) else mac_upper][1]) < max_age:
+            return True
+        return False
 
-        if valid_candidates:
-            # Sort by RSSI descending (strongest signal first)
-            valid_candidates.sort(key=lambda x: x[1], reverse=True)
-            best_node, best_rssi = valid_candidates[0]
-            _LOGGER.info(
-                "Selected best node '%s' for MAC %s based on direct RSSI (%d dBm)",
-                best_node,
-                mac_upper,
-                best_rssi,
-            )
-            return best_node
+    def get_node_rssi(self, device: BleDirectDevice, node: str | None) -> int | None:
+        """Return the last recorded RSSI (in dBm) of `device` on `node`, or None if unknown."""
+        if not node:
+            return None
+        mac_upper = device.mac.upper().replace("-", ":")
+        info = self._topology.get(mac_upper, {}).get(node)
+        if info and "rssi" in info:
+            return int(info["rssi"])
+        return None
 
-        # 2. Room / name affinity matching
+    def _get_affinity_node(self, device: BleDirectDevice, channel: int | None = None) -> tuple[str | None, str]:
+        """Return (affinity_node, matched_keyword) based on device/channel name and room."""
         dev_search_str = ""
         if self._coordinator:
             for l in getattr(self._coordinator, "lights", []):
-                if l.uuid == device.uuid:
+                if l.uuid == device.uuid and (channel is None or l.channel == channel):
                     dev_search_str += f" {l.name} {l.room or ''}"
             for s in getattr(self._coordinator, "shutters", []):
                 if s.uuid == device.uuid:
                     dev_search_str += f" {s.name} {s.room or ''}"
             for sw in getattr(self._coordinator, "switches", []):
-                if sw.uuid == device.uuid:
+                if sw.uuid == device.uuid and (channel is None or sw.channel == channel):
                     dev_search_str += f" {sw.name} {sw.room or ''}"
         dev_search_clean = dev_search_str.lower().replace("-", "_").replace(" ", "_")
 
@@ -315,27 +511,105 @@ class FinderTopologyRouter:
             "cameretta": "bluetooth_proxy_sara",
             "cucina": "esphome_web_ce31c4",
             "media": "esphome_web_cef3a0",
+            "giochi": "esphome_web_cef3a0",
+            "studio": "esp32_bluetooth_proxy_18264c",
             "sala": "esp32_bluetooth_proxy_18264c",
             "soggiorno": "esp32_bluetooth_proxy_18264c",
-            "corridoio": "esp32_bluetooth_proxy_18264c",
+            "pranzo": "esp32_bluetooth_proxy_18264c",
             "ingresso": "esp32_bluetooth_proxy_18264c",
+            "corridoio": "esp32_bluetooth_proxy_18264c",
             "bagno": "bluetooth_proxy_rack_183048",
+            "lavanderia": "bluetooth_proxy_rack_183048",
             "rack": "bluetooth_proxy_rack_183048",
             "matrimoniale": "bluetooth_proxy_edge",
             "letto": "bluetooth_proxy_edge",
         }
         for kw, aff_node in affinity_map.items():
             if kw in dev_search_clean and aff_node in self._esphome_nodes:
+                return aff_node, kw
+        return None, ""
+
+    def select_best_node(self, device: BleDirectDevice, channel: int | None = None) -> str | None:
+        """Select the best ESPHome node to transmit to the target device."""
+        self._discover_registered_nodes()
+        if not self._esphome_nodes:
+            return None
+
+        mac_upper = device.mac.upper().replace("-", ":")
+        now = time.time()
+
+        aff_node, aff_kw = self._get_affinity_node(device, channel=channel)
+
+        candidates = self._topology.get(mac_upper, {})
+        valid_candidates: list[tuple[str, int]] = []
+        for node, info in candidates.items():
+            if node in self._esphome_nodes and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT:
+                valid_candidates.append((node, info.get("rssi", -100)))
+
+        valid_candidates.sort(key=lambda x: x[1], reverse=True)
+        cand_dict = dict(valid_candidates)
+
+        if valid_candidates:
+            best_node, best_rssi = valid_candidates[0]
+            if aff_node:
+                aff_rssi = cand_dict.get(aff_node)
+                if best_node == aff_node:
+                    _LOGGER.info(
+                        "Selected best node '%s' for MAC %s based on room affinity '%s' and direct RSSI (%d dBm)",
+                        best_node,
+                        mac_upper,
+                        aff_kw,
+                        best_rssi,
+                    )
+                    return best_node
+                if best_rssi >= -68 and (aff_rssi is None or best_rssi >= aff_rssi + 8):
+                    _LOGGER.info(
+                        "Selected best node '%s' for MAC %s based on strong direct RSSI (%d dBm, overriding affinity '%s')",
+                        best_node,
+                        mac_upper,
+                        best_rssi,
+                        aff_node,
+                    )
+                    return best_node
                 _LOGGER.info(
-                    "Selected node '%s' for device %s (%s) based on room/name affinity '%s'",
+                    "Selected affinity node '%s' ('%s') for MAC %s over weak cross-room RSSI on '%s' (%d dBm)",
                     aff_node,
-                    device.uuid,
-                    device.mac,
-                    kw,
+                    aff_kw,
+                    mac_upper,
+                    best_node,
+                    best_rssi,
                 )
                 return aff_node
 
-        # 3. Sighting via mesh repeaters (node that sees the most active mesh traffic)
+            _LOGGER.info(
+                "Selected best node '%s' for MAC %s based on direct RSSI (%d dBm)",
+                best_node,
+                mac_upper,
+                best_rssi,
+            )
+            return best_node
+
+        if aff_node:
+            _LOGGER.info(
+                "Selected node '%s' for device %s (%s) based on room/name affinity '%s'",
+                aff_node,
+                device.uuid,
+                device.mac,
+                aff_kw,
+            )
+            return aff_node
+
+        # Historical RSSI for stationary wall devices when >5 min idle
+        hist_candidates: list[tuple[str, int]] = [
+            (node, info.get("rssi", -100))
+            for node, info in candidates.items()
+            if node in self._esphome_nodes
+        ]
+        if hist_candidates:
+            hist_candidates.sort(key=lambda x: x[1], reverse=True)
+            return hist_candidates[0][0]
+
+        # Sighting via mesh repeaters
         mesh_scores: dict[str, int] = {}
         for dev_mac, nodes in self._topology.items():
             for node, info in nodes.items():
@@ -344,21 +618,60 @@ class FinderTopologyRouter:
 
         if mesh_scores:
             best_mesh_node = max(mesh_scores.items(), key=lambda x: x[1])[0]
-            _LOGGER.debug(
-                "Selected best mesh node '%s' for MAC %s based on mesh activity",
-                best_mesh_node,
-                mac_upper,
-            )
             return best_mesh_node
 
-        # 4. Fallback to any discovered node
         fallback_node = next(iter(self._esphome_nodes))
-        _LOGGER.debug(
-            "Fallback to default node '%s' for MAC %s (no RSSI topology data yet)",
-            fallback_node,
-            mac_upper,
-        )
         return fallback_node
+
+    def select_alternate_node(
+        self,
+        device: BleDirectDevice,
+        exclude_node: str | None,
+        channel: int | None = None,
+    ) -> str | None:
+        """Select the best alternate ESPHome node excluding `exclude_node`."""
+        self._discover_registered_nodes()
+        available = [n for n in self._esphome_nodes if n != exclude_node]
+        if not available:
+            return None
+
+        aff_node, _ = self._get_affinity_node(device, channel=channel)
+        if aff_node and aff_node in available:
+            return aff_node
+
+        mac_upper = device.mac.upper().replace("-", ":")
+        now = time.time()
+        candidates = self._topology.get(mac_upper, {})
+
+        # 1. Fresh RSSI candidates (< 5 min)
+        valid_candidates: list[tuple[str, int]] = []
+        for node, info in candidates.items():
+            if node in available and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT:
+                valid_candidates.append((node, info.get("rssi", -100)))
+        if valid_candidates:
+            valid_candidates.sort(key=lambda x: x[1], reverse=True)
+            return valid_candidates[0][0]
+
+        # 2. Historical RSSI candidates (stationary wall-mounted shutters/relays)
+        hist_candidates: list[tuple[str, int]] = [
+            (node, info.get("rssi", -100))
+            for node, info in candidates.items()
+            if node in available and "rssi" in info
+        ]
+        if hist_candidates:
+            hist_candidates.sort(key=lambda x: x[1], reverse=True)
+            return hist_candidates[0][0]
+
+        # 3. Physical room adjacency map from primary / affinity node
+        ref_node = exclude_node or aff_node
+        if ref_node and ref_node in NODE_ADJACENCY_MAP:
+            for neighbor in NODE_ADJACENCY_MAP[ref_node]:
+                if neighbor in available:
+                    return neighbor
+
+        if "esp32_bluetooth_proxy_18264c" in available:
+            return "esp32_bluetooth_proxy_18264c"
+        return available[0]
 
     async def async_dispatch_click(
         self,
@@ -366,7 +679,7 @@ class FinderTopologyRouter:
         channel: int,
         preferred_node: str | None = None,
     ) -> bool:
-        """Transmit a relay / button click via the best ESPHome node or all nodes."""
+        """Transmit a relay / button click via the best ESPHome node or alternate node."""
         self._discover_registered_nodes()
         if not self._esphome_nodes:
             _LOGGER.warning("No ESPHome mesh node available to send click to %s", device.mac)
@@ -378,15 +691,7 @@ class FinderTopologyRouter:
             "channel": channel,
         }
 
-        # If a preferred node is given or we have direct RSSI data, use that specific node
-        mac_upper = device.mac.upper().replace("-", ":")
-        candidates = self._topology.get(mac_upper, {})
-        has_direct_sighting = any(
-            n in self._esphome_nodes and (time.time() - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT
-            for n, info in candidates.items()
-        )
-
-        target_node = preferred_node or self.select_best_node(device)
+        target_node = preferred_node or self.select_best_node(device, channel=channel)
 
         if target_node:
             service_name = f"{target_node}_finder_mesh_click"
@@ -405,9 +710,8 @@ class FinderTopologyRouter:
                     "Failed to send local BLE click via node '%s': %s", target_node, err
                 )
 
-        alt_nodes = [n for n in self._esphome_nodes if n != target_node]
-        if alt_nodes:
-            alt_node = alt_nodes[0]
+        alt_node = self.select_alternate_node(device, exclude_node=target_node, channel=channel)
+        if alt_node:
             alt_service = f"{alt_node}_finder_mesh_click"
             try:
                 _LOGGER.info(
@@ -452,9 +756,8 @@ class FinderTopologyRouter:
             _LOGGER.warning(
                 "Failed to send local BLE percent via node '%s': %s", target_node, err
             )
-            alt_nodes = [n for n in self._esphome_nodes if n != target_node]
-            if alt_nodes:
-                alt_node = alt_nodes[0]
+            alt_node = self.select_alternate_node(device, exclude_node=target_node)
+            if alt_node:
                 alt_service = f"{alt_node}_finder_mesh_set_percent"
                 try:
                     _LOGGER.info(
@@ -497,4 +800,15 @@ class FinderTopologyRouter:
             _LOGGER.warning(
                 "Failed to send local BLE stop via node '%s': %s", target_node, err
             )
+            alt_node = self.select_alternate_node(device, exclude_node=target_node)
+            if alt_node:
+                alt_service = f"{alt_node}_finder_mesh_shutter_stop"
+                try:
+                    _LOGGER.info(
+                        "Retrying local BLE stop via alternate node '%s'", alt_node
+                    )
+                    await self.hass.services.async_call("esphome", alt_service, payload, blocking=True)
+                    return True
+                except Exception as alt_err:
+                    _LOGGER.warning("Alternate node '%s' stop also failed: %s", alt_node, alt_err)
             return False
